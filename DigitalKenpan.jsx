@@ -111,6 +111,12 @@ function safe(fn, fallback) {
 var ABORT_MESSAGE = "__KENPAN_ABORT__";
 var ABORT_FLAG = { on: false };
 
+// 【Mac対策】app.scheduleTask()に渡す文字列はグローバルスコープで評価されるため、
+// buildAndShowDialog()内のローカル関数をそこから呼び出せるよう、グローバル変数に
+// 一時的に参照を格納しておく(クロージャ自体は元のローカルスコープを保持するので、
+// 呼び出し元がグローバルであることは問題にならない)。
+var KENPAN_DEFERRED_SETTINGS_INIT = null;
+
 function abortKeyPressed() {
     return safe(function () {
         var ks = ScriptUI.environment.keyboardState;
@@ -2300,7 +2306,10 @@ function buildAndShowDialog() {
     settingsContent.spacing = 6;
     settingsContent.margins = 0;
 
-    var settingsScrollbar = settingsViewportRow.add("scrollbar", undefined, 0, 0, 0);
+    // 【Mac対策】boundsをundefinedのまま生成すると、生成時点の暫定サイズ(幅≒高さに近い正方形)から
+    // 縦/横どちらの向きのスクロールバーかが確定してしまい、後からのリサイズで縦長にしても
+    // 向きが追随しないことがある。生成時点で明確に縦長のboundsを与えて縦スクロールバーに確定させる。
+    var settingsScrollbar = settingsViewportRow.add("scrollbar", [0, 0, 16, 200], 0, 0, 0);
     settingsScrollbar.preferredSize.width = 16;
     settingsScrollbar.alignment = ["right", "fill"];
     settingsScrollbar.minvalue = 0;
@@ -2316,12 +2325,25 @@ function buildAndShowDialog() {
     var settingsBaseline = null;       // 初回レイアウト確定時のジオメトリ記録
     var settingsContentNaturalH = 0;   // 設定コンテンツの自然高(初回実測で固定)
 
+    // 【Mac対策】win.onShow直後はCocoa側のネイティブレイアウトが未確定で、
+    // サイズ実測(.size)が不正確な場合がある(0や暫定値のまま)。
+    // このタイミングでコンテンツ高を誤って固定してしまうと、後から正しい値で
+    // 再測定しようとしても maximumSize の制約に阻まれて自然高を測れなくなる
+    // (固定値の"自己ポイズニング")。そのため毎回の測定前に制約を一旦解除し、
+    // 明示的に layout.layout(true) を呼んでから実測する(冪等・再呼び出し安全)。
     function captureSettingsBaseline() {
         try {
+            settingsContent.minimumSize = [0, 0];
+            settingsContent.maximumSize = [100000, 100000];
+            win.layout.layout(true);
             // コンテンツの自然高を実測して固定し、以後のlayout処理で縮まないようにする
             // (layout.resize()がcolumn内でコンテンツをビューポート高に縮めてしまうと、
             //  実高=可視高になりスクロール不要と誤判定されるため)
             settingsContentNaturalH = settingsContent.size[1];
+            if (!settingsContentNaturalH || settingsContentNaturalH < 10) {
+                // 実測が不正(未確定)な場合はpreferredSizeにフォールバック
+                settingsContentNaturalH = settingsContent.preferredSize ? settingsContent.preferredSize[1] : 0;
+            }
             settingsContent.minimumSize.height = settingsContentNaturalH;
             settingsContent.maximumSize.height = settingsContentNaturalH;
             settingsBaseline = {
@@ -2355,28 +2377,60 @@ function buildAndShowDialog() {
         } catch (eRsz) {}
     }
 
+    // 【最終防衛策】baseline計算やOS依存のタイミング問題の原因が何であれ、
+    // 「ボタン列が画面外に出ない」ことだけは無条件に保証する。
+    // settingsPanel自身の実測サイズ(そのままwin内に収まっているはず)を基準に、
+    // ボタン列の下端がパネル内に収まっているかを直接検証し、はみ出ていれば強制的に引き戻す。
+    // baselineの正しさに依存しないため、原因不明のケースでも効く。
+    function ensureSettingsButtonsVisible() {
+        try {
+            if (!settingsPanel.size || !settingsBtnGroup.size || !settingsBtnGroup.location) return;
+            var panelH = settingsPanel.size[1];
+            var marginBottom = 12; // settingsPanel.margins(=12)に合わせた下端余白
+            var usableH = panelH - marginBottom;
+            var btnH = settingsBtnGroup.size[1];
+            var btnTop = settingsBtnGroup.location[1];
+            var btnBottom = btnTop + btnH;
+            if (btnBottom > usableH || btnTop < 0 || btnH <= 0) {
+                var desiredBtnY = usableH - btnH;
+                if (desiredBtnY < 0) desiredBtnY = 0;
+                settingsBtnGroup.location = [settingsBtnGroup.location[0], desiredBtnY];
+                // ビューポート/スクロールバーもボタン上端までに収まるよう縮小して整合させる
+                var vpLoc = settingsViewport.location;
+                var topY = vpLoc ? vpLoc[1] : 0;
+                var vpH2 = desiredBtnY - topY - 4;
+                if (vpH2 < 40) vpH2 = 40;
+                settingsViewport.size = [settingsViewport.size[0], vpH2];
+                settingsScrollbar.size = [settingsScrollbar.size[0], vpH2];
+            }
+        } catch (eEnsure) {}
+    }
+
     // スクロール範囲の再計算。判定は「固定したコンテンツ自然高 vs ビューポート可視高(リサイズ後)」。
     // ウィンドウ高がコンテンツ高より小さい場合: viewportH < settingsContentNaturalH となり
     // maxScroll > 0 → else分岐で scrollbar.visible = true / enabled = true になる。
     function updateSettingsScrollRange() {
         try {
-            if (!settingsBaseline) return;
-            var viewportH = settingsViewport.size ? settingsViewport.size[1] : 0;
-            var maxScroll = settingsContentNaturalH - viewportH;
-            if (maxScroll < 0) maxScroll = 0;
-            settingsScrollbar.maxvalue = maxScroll;
-            if (maxScroll <= 0) {
-                settingsScrollbar.value = 0;
-                settingsContent.location = [0, 0];
-                settingsScrollbar.enabled = false;
-                settingsScrollbar.visible = false;
-            } else {
-                settingsScrollbar.enabled = true;
-                settingsScrollbar.visible = true;
-                if (settingsScrollbar.value > maxScroll) settingsScrollbar.value = maxScroll;
-                settingsContent.location = [0, -settingsScrollbar.value];
+            if (settingsBaseline) {
+                var viewportH = settingsViewport.size ? settingsViewport.size[1] : 0;
+                var maxScroll = settingsContentNaturalH - viewportH;
+                if (maxScroll < 0) maxScroll = 0;
+                settingsScrollbar.maxvalue = maxScroll;
+                if (maxScroll <= 0) {
+                    settingsScrollbar.value = 0;
+                    settingsContent.location = [0, 0];
+                    settingsScrollbar.enabled = false;
+                    settingsScrollbar.visible = false;
+                } else {
+                    settingsScrollbar.enabled = true;
+                    settingsScrollbar.visible = true;
+                    if (settingsScrollbar.value > maxScroll) settingsScrollbar.value = maxScroll;
+                    settingsContent.location = [0, -settingsScrollbar.value];
+                }
             }
         } catch (eScroll) {}
+        // baseline計算の成否によらず、ボタン列の可視性は必ずこの後で保証する
+        ensureSettingsButtonsVisible();
     }
     settingsScrollbar.onChanging = function () {
         settingsContent.location = [0, -this.value];
@@ -2588,11 +2642,15 @@ function buildAndShowDialog() {
     var progressBar = progressGroup.add("progressbar", undefined, 0, 100);
     progressBar.preferredSize.height = 12;
     progressBar.alignment = ["fill", "top"]; // 幅はウィンドウに追随
-    var progressLabel = progressGroup.add("statictext", undefined, "");
-    // Mac対策: statictextは生成時テキスト基準で幅が確定し、後から長いテキストを
-    // 代入すると幅を超えた部分が描画されない(Winでは描画される)。
-    // 進捗メッセージ(最大40文字に短縮したファイル名を含む)が収まる幅を確保しておく。
-    progressLabel.characters = 60;
+    // 【Mac対策・再修正】v4では statictext + characters=60 で幅確保を試みたが、
+    // "characters" は本来 edittext 用のプロパティであり statictext には正式サポートが無く、
+    // Mac(Cocoa)側で無視されて幅確保が効いていなかった可能性が高い。
+    // 全プラットフォーム共通でサポートされる preferredSize.width をピクセル値で直接指定する方式に変更し、
+    // さらに、動的テキスト更新がstatictextより確実とされる readonly edittext に置き換える
+    // (Mac の ScriptUI では動作中の statictext 差し替えが描画に反映されない既知の癖があるため)。
+    var progressLabel = progressGroup.add("edittext", undefined, "", { readonly: true });
+    progressLabel.preferredSize.width = 620;
+    progressLabel.alignment = ["fill", "top"];
     var progressAbortRow = progressGroup.add("group");
     var abortBtn = progressAbortRow.add("button", undefined, "中断");
     var abortNote = progressAbortRow.add("statictext", undefined, "※ ボタンが反応しない場合は ESC キーを押し続けてください(ESCキーで確実に中断できます)");
@@ -2789,6 +2847,10 @@ function buildAndShowDialog() {
                     progressLabel.text = label;
                 }
                 win.update();
+                // 【Mac対策・追加】win.update() だけでは同期実行中の再描画が反映されないケースに
+                // 備え、アプリ側の再描画とイベントループへの処理譲渡を試みる(効果が無くても無害)。
+                safe(function () { app.refresh(); return null; }, null);
+                safe(function () { $.sleep(1); return null; }, null);
             });
         } catch (e) {
             if (isAbortError(e)) wasAborted = true;
@@ -2839,10 +2901,20 @@ function buildAndShowDialog() {
         }
         updateSettingsScrollRange();
     };
-    // ダイアログ表示直後: 初回レイアウト確定値を記録し、初期スクロール範囲を計算する
-    win.onShow = function () {
+    // ダイアログ表示直後: 初回レイアウト確定値を記録し、初期スクロール範囲を計算する。
+    // 【Mac対策】Cocoa側では onShow 発火時点でもネイティブレイアウトが未確定な場合があるため、
+    // 即時実行に加えて app.scheduleTask() で少し遅延させた再計測・再補正も行う
+    // (Windowsでは既に確定済みの値を再測定するだけなので実害はない=冪等)。
+    KENPAN_DEFERRED_SETTINGS_INIT = function () {
         captureSettingsBaseline();
-        updateSettingsScrollRange();
+        updateSettingsScrollRange(); // 内部で ensureSettingsButtonsVisible() も呼ばれる
+    };
+    win.onShow = function () {
+        KENPAN_DEFERRED_SETTINGS_INIT();
+        safe(function () {
+            app.scheduleTask("KENPAN_DEFERRED_SETTINGS_INIT();", 80, false);
+            return null;
+        }, null);
     };
     // 初期高さが画面からはみ出さないよう、画面高の90%を上限にする(Win/Mac共通)
     var scr = safe(function () { return $.screens[0]; }, null);
@@ -2851,6 +2923,20 @@ function buildAndShowDialog() {
         var maxW = Math.floor((scr.right - scr.left) * 0.95);
         if (maxH > 300 && maxW > 400) {
             win.maximumSize = [maxW, maxH];
+        }
+    }
+    // 【Mac対策】win.maximumSize は基本的に「ユーザーがドラッグで拡大できる上限」であり、
+    // ウィンドウの初期自動サイズがそれを超えていても自動的には縮められないことがある
+    // (特にMacで顕著。自然サイズのまま画面より大きいウィンドウが生成され、
+    // 画面外にはみ出た下端のボタン列やスクロールバーが見えなくなる、という今回の症状と一致する)。
+    // 表示前に明示的にレイアウトを確定させ、上限を超えていれば強制的に縮めてから表示する。
+    win.layout.layout(true);
+    if (win.maximumSize && win.size) {
+        var clampW = win.size[0] > win.maximumSize[0] ? win.maximumSize[0] : win.size[0];
+        var clampH = win.size[1] > win.maximumSize[1] ? win.maximumSize[1] : win.size[1];
+        if (clampW !== win.size[0] || clampH !== win.size[1]) {
+            win.size = [clampW, clampH];
+            win.layout.layout(true);
         }
     }
     win.center();
