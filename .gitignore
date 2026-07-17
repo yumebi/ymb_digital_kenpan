@@ -1,0 +1,9 @@
+# バックアップ・作業ファイル
+*.bak
+
+# 実行時に生成される設定ファイル
+DigitalKenpan_settings.txt
+
+# OS
+.DS_Store
+Thumbs.db
