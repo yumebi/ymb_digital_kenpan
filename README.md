@@ -47,7 +47,7 @@ Adobe Illustrator 用のデジタル検版(プリフライトチェック)スク
 - ドキュメント走査は1回の再帰走査を全チェックで共有(大規模データ対応)
 - リンク画像はファイルヘッダ自前解析(JPEG/PNG/TIFF/PSD/BMP/GIF、先頭64KBのみ読込)
 
-詳細な判定ロジック・制限事項・チェック項目の追加方法は **[docs/SPEC.md](docs/SPEC.md)** を参照してください。
+詳細な判定ロジック・制限事項・チェック項目の追加方法は **[docs/SPEC.md](docs/SPEC.md)** を、開発の経緯は **[docs/CHANGELOG.md](docs/CHANGELOG.md)** を参照してください。
 
 ## ライセンス
 
