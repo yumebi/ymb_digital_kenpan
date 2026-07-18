@@ -23,6 +23,73 @@
 var KENPAN_VERSION = "1.9.0";
 
 // -----------------------------------------------------------------------------
+// 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
+//     Windows/Macで再現状況が異なる不具合(設定画面のスクロールバー非表示、
+//     進捗ラベルのファイル名非表示)を推測ベースの修正では解決しきれなかったため、
+//     実際の実行時状態をテキストファイルに書き出して確認する方式に切り替える。
+//     調査が終わったら KENPAN_DEBUG_LOG = false にすればログ出力は完全に止まる
+//     (dlog()自体は残しておいてよい。呼び出し箇所を消さなくても影響が無い設計)。
+// -----------------------------------------------------------------------------
+
+var KENPAN_DEBUG_LOG = true; // 調査終了後は false にすること
+
+// デバッグログを1行追記する。KENPAN_DEBUG_LOG が false のときは何もしない。
+// 書き込み失敗(権限が無い等)しても本体機能に一切影響しないよう、全体をsafe()相当の
+// try/catchで保護する。Macでデスクトップへの書き込み権限が無い環境を考慮し、
+// Folder.desktop への書き込みに失敗した場合は Folder.myDocuments へフォールバックする。
+function dlog(tag, message) {
+    if (!KENPAN_DEBUG_LOG) return;
+    try {
+        var line = "[" + nowString() + "] [" + tag + "] " + message;
+        var wrote = false;
+        try {
+            var f1 = new File(Folder.desktop.fsName + "/DigitalKenpan_debug.log");
+            f1.encoding = "UTF-8";
+            if (f1.open("a")) {
+                f1.writeln(line);
+                f1.close();
+                wrote = true;
+            }
+        } catch (eDesktop) {
+            wrote = false;
+        }
+        if (!wrote) {
+            try {
+                var f2 = new File(Folder.myDocuments.fsName + "/DigitalKenpan_debug.log");
+                f2.encoding = "UTF-8";
+                if (f2.open("a")) {
+                    f2.writeln(line);
+                    f2.close();
+                }
+            } catch (eDocs) {
+                // ここまで失敗したら諦める(本体機能への影響を避けるため例外を外に出さない)
+            }
+        }
+    } catch (eOuter) {
+        // dlog自体が本体機能を壊すことは絶対に避ける
+    }
+}
+
+// デバッグログ用の整形ヘルパー(ES3にJSONが無いため手書き)。
+// win.size / settingsViewport.size 等の [w,h] 配列を文字列化する。
+function fmtArr(a) {
+    if (a === null || a === undefined) return "(null)";
+    try {
+        var parts = [];
+        for (var i = 0; i < a.length; i++) parts.push(String(a[i]));
+        return "[" + parts.join(",") + "]";
+    } catch (e) { return "(取得失敗:" + e.toString() + ")"; }
+}
+
+// $.screens[0] のようなleft/top/right/bottomプロパティを持つ矩形オブジェクトを文字列化する。
+function fmtScreen(scr) {
+    if (!scr) return "(null)";
+    try {
+        return "{left:" + scr.left + ",top:" + scr.top + ",right:" + scr.right + ",bottom:" + scr.bottom + "}";
+    } catch (e) { return "(取得失敗:" + e.toString() + ")"; }
+}
+
+// -----------------------------------------------------------------------------
 // 0. 基本ユーティリティ
 // -----------------------------------------------------------------------------
 
@@ -1595,7 +1662,12 @@ CHECKS.image_colormode = function (doc, cfg, ctx) {
             throwIfAborted(); // 画像1ファイルごとに中断(ESC)を確認
             var file = safe(function () { return item.file; }, null);
             if (!file || !file.exists) continue; // リンク切れは別チェックで報告
-            if (ctx.tick) ctx.tick("画像カラーモード判定中: " + truncateForProgress(safe(function () { return file.displayName; }, ""), 40));
+            (function () {
+                var rawName = safe(function () { return file.displayName; }, "");
+                var shortName = truncateForProgress(rawName, 40);
+                dlog("PROGRESS", "カラーモード判定中 短縮前=[" + rawName + "] 短縮後=[" + shortName + "]");
+                if (ctx.tick) ctx.tick("画像カラーモード判定中: " + shortName);
+            })();
             var info = getImageInfoCached(file);
             if (!info.ok || info.colorMode === "UNKNOWN") {
                 warnCount++;
@@ -1631,7 +1703,12 @@ CHECKS.image_resolution = function (doc, cfg, ctx) {
             throwIfAborted(); // 画像1ファイルごとに中断(ESC)を確認
             var file = safe(function () { return item.file; }, null);
             if (!file || !file.exists) continue;
-            if (ctx.tick) ctx.tick("実効解像度算出中: " + truncateForProgress(safe(function () { return file.displayName; }, ""), 40));
+            (function () {
+                var rawName2 = safe(function () { return file.displayName; }, "");
+                var shortName2 = truncateForProgress(rawName2, 40);
+                dlog("PROGRESS", "実効解像度算出中 短縮前=[" + rawName2 + "] 短縮後=[" + shortName2 + "]");
+                if (ctx.tick) ctx.tick("実効解像度算出中: " + shortName2);
+            })();
             var info = getImageInfoCached(file);
             if (!info.ok) {
                 warnCount++;
@@ -2362,8 +2439,15 @@ function buildAndShowDialog() {
     // 再測定しようとしても maximumSize の制約に阻まれて自然高を測れなくなる
     // (固定値の"自己ポイズニング")。そのため毎回の測定前に制約を一旦解除し、
     // 明示的に layout.layout(true) を呼んでから実測する(冪等・再呼び出し安全)。
-    function captureSettingsBaseline() {
+    // sourceTag: どの呼び出し経路から来たかログで区別するための文字列
+    // ("onShow-immediate" / "onShow-deferred80ms" 等)。省略時は "(不明)"。
+    function captureSettingsBaseline(sourceTag) {
+        var tag = sourceTag ? sourceTag : "(不明)";
         try {
+            dlog("SCROLL", "captureSettingsBaseline[" + tag + "] 開始: win.size=" + fmtArr(win.size) +
+                " settingsViewport.size(制約解除前)=" + fmtArr(safe(function () { return settingsViewport.size; }, null)) +
+                " settingsContent.size(制約解除前)=" + fmtArr(safe(function () { return settingsContent.size; }, null)) +
+                " screens[0]=" + fmtScreen(safe(function () { return $.screens[0]; }, null)));
             settingsContent.minimumSize = [0, 0];
             settingsContent.maximumSize = [100000, 100000];
             win.layout.layout(true);
@@ -2371,9 +2455,11 @@ function buildAndShowDialog() {
             // (layout.resize()がcolumn内でコンテンツをビューポート高に縮めてしまうと、
             //  実高=可視高になりスクロール不要と誤判定されるため)
             settingsContentNaturalH = settingsContent.size[1];
+            var usedFallback = false;
             if (!settingsContentNaturalH || settingsContentNaturalH < 10) {
                 // 実測が不正(未確定)な場合はpreferredSizeにフォールバック
                 settingsContentNaturalH = settingsContent.preferredSize ? settingsContent.preferredSize[1] : 0;
+                usedFallback = true;
             }
             settingsContent.minimumSize.height = settingsContentNaturalH;
             settingsContent.maximumSize.height = settingsContentNaturalH;
@@ -2389,7 +2475,15 @@ function buildAndShowDialog() {
                 // baselineでの位置記録・差分再配置の対象から外した(常にネイティブlayoutの
                 // top寄せに任せる。詳細はensureSettingsButtonsVisible()を参照)。
             };
-        } catch (eCap) {}
+            dlog("SCROLL", "captureSettingsBaseline[" + tag + "] 完了: settingsContentNaturalH=" + settingsContentNaturalH +
+                " (preferredSizeへのフォールバック使用=" + usedFallback + ")" +
+                " settingsContent.size(制約後)=" + fmtArr(safe(function () { return settingsContent.size; }, null)) +
+                " settingsViewport.size=" + fmtArr(settingsViewport.size) +
+                " win.size=" + fmtArr(win.size) +
+                " screens[0]=" + fmtScreen(safe(function () { return $.screens[0]; }, null)));
+        } catch (eCap) {
+            dlog("SCROLL", "captureSettingsBaseline[" + tag + "] 例外発生: " + eCap.toString());
+        }
     }
 
     // 設定画面のジオメトリを「baseline + ウィンドウサイズ差分」で機械的に再配置する。
@@ -2443,14 +2537,24 @@ function buildAndShowDialog() {
                     settingsContent.location = [0, 0];
                     settingsScrollbar.enabled = false;
                     settingsScrollbar.visible = false;
+                    dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
+                        " viewportH=" + viewportH + " maxScroll=" + maxScroll +
+                        " -> scrollbar.enabled=false visible=false (全部見えていると判定)");
                 } else {
                     settingsScrollbar.enabled = true;
                     settingsScrollbar.visible = true;
                     if (settingsScrollbar.value > maxScroll) settingsScrollbar.value = maxScroll;
                     settingsContent.location = [0, -settingsScrollbar.value];
+                    dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
+                        " viewportH=" + viewportH + " maxScroll=" + maxScroll +
+                        " -> scrollbar.enabled=true visible=true (スクロール必要と判定)");
                 }
+            } else {
+                dlog("SCROLL", "updateSettingsScrollRange: settingsBaselineが未確定のためスキップ");
             }
-        } catch (eScroll) {}
+        } catch (eScroll) {
+            dlog("SCROLL", "updateSettingsScrollRange: 例外発生 " + eScroll.toString());
+        }
         // baseline計算の成否によらず、ボタン列の可視性は必ずこの後で保証する
         ensureSettingsButtonsVisible();
     }
@@ -2672,6 +2776,9 @@ function buildAndShowDialog() {
     var progressLabel = progressGroup.add("edittext", undefined, "", { readonly: true });
     progressLabel.preferredSize.width = 620;
     progressLabel.alignment = ["fill", "top"];
+    dlog("PROGRESS", "progressLabel生成直後: type=" + safe(function () { return progressLabel.type; }, "(不明)") +
+        " preferredSize=" + fmtArr(safe(function () { return progressLabel.preferredSize; }, null)) +
+        " size=" + fmtArr(safe(function () { return progressLabel.size; }, null)));
     var progressAbortRow = progressGroup.add("group");
     var abortBtn = progressAbortRow.add("button", undefined, "中断");
     var abortNote = progressAbortRow.add("statictext", undefined, "※ ボタンが反応しない場合は ESC キーを押し続けてください(ESCキーで確実に中断できます)");
@@ -2962,12 +3069,24 @@ function buildAndShowDialog() {
                     // 一度空にしてから代入する(既知のワークアラウンド。Winでは無害)
                     progressLabel.text = "";
                     progressLabel.text = label;
+                    // 【診断ログ】代入直後に読み戻して一致するか確認する。
+                    // ここで readBack が label と食い違っていれば、代入自体は成功しているのに
+                    // 「描画」だけが反映されていない(Mac特有の再描画不良)ことの裏付けになる。
+                    // 逆に readBack が空/別の値なら、代入そのものが失敗している可能性を示す。
+                    var readBack = safe(function () { return progressLabel.text; }, "(読み戻し失敗)");
+                    dlog("PROGRESS", "progressLabel更新: 設定した値=[" + label + "] 読み戻した値=[" + readBack + "] 一致=" + (readBack === label));
                 }
-                win.update();
+                var updateErr = null, refreshErr = null, sleepErr = null;
+                try { win.update(); } catch (eUpd) { updateErr = eUpd; }
                 // 【Mac対策・追加】win.update() だけでは同期実行中の再描画が反映されないケースに
                 // 備え、アプリ側の再描画とイベントループへの処理譲渡を試みる(効果が無くても無害)。
-                safe(function () { app.refresh(); return null; }, null);
-                safe(function () { $.sleep(1); return null; }, null);
+                try { app.refresh(); } catch (eRef) { refreshErr = eRef; }
+                try { $.sleep(1); } catch (eSlp) { sleepErr = eSlp; }
+                if (updateErr || refreshErr || sleepErr) {
+                    dlog("PROGRESS", "再描画呼び出しで例外: win.update()=" + (updateErr ? updateErr.toString() : "OK") +
+                        " app.refresh()=" + (refreshErr ? refreshErr.toString() : "OK") +
+                        " $.sleep(1)=" + (sleepErr ? sleepErr.toString() : "OK"));
+                }
             });
         } catch (e) {
             if (isAbortError(e)) wasAborted = true;
@@ -3011,6 +3130,7 @@ function buildAndShowDialog() {
     // 伸縮に自動レイアウトが必要なため従来通り layout.resize() を使う。
     win.onResizing = function () {};
     win.onResize = function () {
+        dlog("SCROLL", "win.onResize発火: 新しいwin.size=" + fmtArr(win.size) + " resultPanel.visible=" + resultPanel.visible);
         if (resultPanel.visible) {
             this.layout.resize();
         } else {
@@ -3022,14 +3142,20 @@ function buildAndShowDialog() {
     // 【Mac対策】Cocoa側では onShow 発火時点でもネイティブレイアウトが未確定な場合があるため、
     // 即時実行に加えて app.scheduleTask() で少し遅延させた再計測・再補正も行う
     // (Windowsでは既に確定済みの値を再測定するだけなので実害はない=冪等)。
-    KENPAN_DEFERRED_SETTINGS_INIT = function () {
-        captureSettingsBaseline();
+    // 【診断ログ】app.scheduleTask()の文字列はグローバルスコープで評価されるため、
+    // このKENPAN_DEFERRED_SETTINGS_INIT(グローバル変数に格納した参照)経由の呼び出しが
+    // 実際に80ms後に発火しているかどうかも、sourceTagの有無で判別できるようにしている
+    // (もし「onShow-immediate」のログしか出ず「onShow-deferred80ms」が一度も出ない場合、
+    //  scheduleTaskからの呼び出し自体が失敗している=Mac不具合の有力な手がかりになる)。
+    KENPAN_DEFERRED_SETTINGS_INIT = function (sourceTag) {
+        captureSettingsBaseline(sourceTag);
         updateSettingsScrollRange(); // 内部で ensureSettingsButtonsVisible() も呼ばれる
     };
     win.onShow = function () {
-        KENPAN_DEFERRED_SETTINGS_INIT();
+        dlog("SCROLL", "win.onShow発火(即時): win.size=" + fmtArr(win.size) + " screens[0]=" + fmtScreen(safe(function () { return $.screens[0]; }, null)));
+        KENPAN_DEFERRED_SETTINGS_INIT("onShow-immediate");
         safe(function () {
-            app.scheduleTask("KENPAN_DEFERRED_SETTINGS_INIT();", 80, false);
+            app.scheduleTask("KENPAN_DEFERRED_SETTINGS_INIT('onShow-deferred80ms');", 80, false);
             return null;
         }, null);
     };
@@ -3065,6 +3191,10 @@ function buildAndShowDialog() {
 // -----------------------------------------------------------------------------
 
 function main() {
+    dlog("BOOT", "DigitalKenpan起動 OS=" + safe(function () { return $.os; }, "(不明)") +
+        " version=" + KENPAN_VERSION +
+        " ScriptUIバージョン=" + safe(function () { return ScriptUI.version; }, "(不明)") +
+        " appVersion=" + safe(function () { return app.version; }, "(不明)"));
     if (app.documents.length === 0) {
         alert("開いているドキュメントがありません。\nIllustratorでドキュメントを開いてから実行してください。");
         return;
@@ -3072,6 +3202,7 @@ function main() {
     try {
         buildAndShowDialog();
     } catch (e) {
+        dlog("FATAL", "buildAndShowDialogで例外: " + e.toString() + (e.line ? (" 行:" + e.line) : ""));
         alert("デジタル検版ツールの実行中にエラーが発生しました。\n" + e.toString() + (e.line ? ("\n(行: " + e.line + ")") : ""));
     }
 }
