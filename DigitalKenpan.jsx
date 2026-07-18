@@ -151,45 +151,98 @@ function recordDocIdentity(doc) {
         // 未保存ドキュメントは fullName へのアクセスが例外になることがあるため、
         // ここだけ個別に try/catch する(safe()のfallbackだと例外か未保存かの
         // 区別がつけにくいため明示的に分ける)。
-        STATE.docFullName = doc.fullName.fsName;
+        var fp = doc.fullName.fsName;
+        // 空文字列等の無効値が紛れ込んで「保存済み扱い」になるのを防ぐガード
+        if (fp && String(fp).length > 0) {
+            STATE.docFullName = fp;
+        }
     } catch (eFN) {
         STATE.docFullName = null;
     }
 }
 
-// STATEに記録した識別情報(パス優先、無ければファイル名)から、現在開いている
-// ドキュメントの中から対象を探し直す。オブジェクト参照は一切保持しない。
-// - パスが分かっている場合: app.documents を走査してパス一致を探す
-// - パスが無い(未保存だった)場合: ファイル名一致で探す。複数一致は曖昧なため
-//   解決失敗として扱う(誤ったドキュメントを操作しないことを優先)
+// resolveTargetDoc()の直近の解決結果に関する診断情報(人間可読な文字列)。
+// 解決に失敗した場合、呼び出し元のアラートにこれを含めることで、
+// 「ドキュメントは閉じていないのに警告が出る」系の不具合が再発した際に
+// どの分岐で・なぜ一致しなかったかを実機ログ無しでも切り分けられるようにする。
+var STATE_RESOLVE_DEBUG = "";
+
+// STATEに記録した識別情報(パス優先、無ければファイル名、それも無ければ「開いているのが
+// 1つだけなら採用」の最終フォールバック)から、現在開いているドキュメントの中から対象を
+// 探し直す。オブジェクト参照は一切保持しない。
 // 見つかった場合は app.activeDocument への設定も試みる(失敗しても致命的ではない)。
 // 見つからなければ null を返す(呼び出し側で「見つかりません」表示をすること)。
 function resolveTargetDoc() {
+    var dbg = [];
     try {
         var docs = app.documents;
         var found = null;
+        dbg.push("開いているドキュメント数: " + docs.length);
+        dbg.push("記録済みdocFullName: " + (STATE.docFullName ? STATE.docFullName : "(なし/未保存)"));
+        dbg.push("記録済みdocName: " + (STATE.docName ? STATE.docName : "(なし)"));
+
+        // ---- 分岐A: 保存先パス(fsName)による照合 ----
+        // 記録時(recordDocIdentity)・照合時のどちらも同じ doc.fullName.fsName を使う
+        // (プロパティの取得方法を必ず統一すること。異なるプロパティ/メソッドを使うと
+        //  OS依存のパス表記差異で一致しなくなるため)。
         if (STATE.docFullName) {
+            var seenPaths = [];
             for (var i = 0; i < docs.length; i++) {
                 var d = docs[i];
-                var fp = safe(function () { return d.fullName.fsName; }, null);
-                if (fp !== null && fp === STATE.docFullName) { found = d; break; }
+                var fp2 = safe(function () { return d.fullName.fsName; }, null);
+                seenPaths.push(fp2 === null ? "(取得失敗/未保存)" : fp2);
+                if (fp2 !== null && fp2 === STATE.docFullName) { found = d; break; }
             }
+            dbg.push("[分岐A:パス照合] 走査結果: " + seenPaths.join(" | "));
+            dbg.push("[分岐A:パス照合] " + (found ? "一致" : "不一致"));
+        } else {
+            dbg.push("[分岐A:パス照合] スキップ(docFullName未記録=未保存ドキュメントだった)");
         }
+
+        // ---- 分岐B: ファイル名による照合(未保存だった場合、または分岐Aが不一致の場合) ----
         if (!found && STATE.docName) {
             var matches = [];
+            var seenNames = [];
             for (var j = 0; j < docs.length; j++) {
                 var d2 = docs[j];
                 var nm = safe(function () { return d2.name; }, null);
+                seenNames.push(nm === null ? "(取得失敗)" : nm);
                 if (nm === STATE.docName) matches.push(d2);
             }
-            // name一致が複数件ある場合は曖昧なので解決失敗として扱う(誤ったドキュメントを操作しない)
-            if (matches.length === 1) found = matches[0];
+            dbg.push("[分岐B:名前照合] 走査結果: " + seenNames.join(" | "));
+            if (matches.length === 1) {
+                found = matches[0];
+                dbg.push("[分岐B:名前照合] 1件一致");
+            } else if (matches.length > 1) {
+                // 複数一致は曖昧なので解決失敗として扱う(誤ったドキュメントを操作しないことを優先)
+                dbg.push("[分岐B:名前照合] " + matches.length + "件一致(同名複数のため曖昧と判断し不採用)");
+            } else {
+                dbg.push("[分岐B:名前照合] 一致なし");
+            }
+        } else if (!found) {
+            dbg.push("[分岐B:名前照合] スキップ(docName未記録、または既に分岐Aで解決済み)");
         }
+
+        // ---- 分岐C: 最終フォールバック ----
+        // 開いているドキュメントが1つだけなら、A/Bの照合方式に環境依存の差異
+        // (パス区切り・大文字小文字・Unicode正規化・ネットワークパス表記等)があっても
+        // 曖昧さが原理的に発生し得ないため、それを対象とみなす。
+        // 「ドキュメントは実際には閉じていないのに見つからない」という誤警告を防ぐ最後の砦。
+        if (!found && docs.length === 1) {
+            found = docs[0];
+            dbg.push("[分岐C:単一ドキュメントフォールバック] 開いているドキュメントが1つのみのため採用");
+        } else if (!found) {
+            dbg.push("[分岐C:単一ドキュメントフォールバック] スキップ(複数 or 0件のため採用不可)");
+        }
+
         if (found) {
             safe(function () { app.activeDocument = found; return null; }, null);
         }
+        STATE_RESOLVE_DEBUG = dbg.join("\n");
         return found;
     } catch (eResolve) {
+        dbg.push("[例外] resolveTargetDoc内で例外が発生: " + eResolve.toString());
+        STATE_RESOLVE_DEBUG = dbg.join("\n");
         return null;
     }
 }
@@ -3117,8 +3170,8 @@ function showResultsPalette() {
         var targetDoc = resolveTargetDoc();
         if (!targetDoc) {
             var msgNoDoc = "対象ドキュメントが見つかりません(閉じられた可能性があります)。";
-            selStatusText.text = msgNoDoc;
-            if (!silent) alert(msgNoDoc);
+            selStatusText.text = msgNoDoc + "\n[診断情報]\n" + STATE_RESOLVE_DEBUG;
+            if (!silent) alert(msgNoDoc + "\n\n[診断情報]\n" + STATE_RESOLVE_DEBUG);
             return;
         }
         var rep;
@@ -3167,7 +3220,7 @@ function showResultsPalette() {
     rescanBtn.onClick = function () {
         var targetDoc = resolveTargetDoc();
         if (!targetDoc) {
-            alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。");
+            alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。\n\n[診断情報]\n" + STATE_RESOLVE_DEBUG);
             return;
         }
         if (!STATE.cfg) {
@@ -3227,7 +3280,7 @@ function showResultsPalette() {
     saveHtmlBtn.onClick = function () {
         if (!currentResults) return;
         var targetDoc = resolveTargetDoc();
-        if (!targetDoc) { alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。"); return; }
+        if (!targetDoc) { alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。\n\n[診断情報]\n" + STATE_RESOLVE_DEBUG); return; }
         var folder = Folder.selectDialog("レポートの保存先フォルダを選択してください");
         if (!folder) return;
         var baseName = targetDoc.name.replace(/\.[^\.]+$/, "");
@@ -3240,7 +3293,7 @@ function showResultsPalette() {
     saveCsvBtn.onClick = function () {
         if (!currentResults) return;
         var targetDoc = resolveTargetDoc();
-        if (!targetDoc) { alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。"); return; }
+        if (!targetDoc) { alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。\n\n[診断情報]\n" + STATE_RESOLVE_DEBUG); return; }
         var folder2 = Folder.selectDialog("レポートの保存先フォルダを選択してください");
         if (!folder2) return;
         var baseName2 = targetDoc.name.replace(/\.[^\.]+$/, "");
