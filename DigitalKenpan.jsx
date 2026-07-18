@@ -121,6 +121,105 @@ var ABORT_FLAG = { on: false };
 // 呼び出し元がグローバルであることは問題にならない)。
 var KENPAN_DEFERRED_SETTINGS_INIT = null;
 
+// -----------------------------------------------------------------------------
+// 0c. 結果パレット用の永続状態とドキュメント識別(パレット化対応)
+//     #targetengineにより、設定ダイアログ(モーダル)を閉じた後もこのスクリプトの
+//     エンジンは生存し続け、非モーダルの結果パレットのイベントハンドラから
+//     引き続き参照される。STATEはその橋渡し役。
+// -----------------------------------------------------------------------------
+
+var STATE = {
+    results: null,      // 直近の検版結果
+    summary: null,       // summarizeResults()の結果
+    cfg: null,           // 検版実行に使った設定(collectConfigFromUIのスナップショット)
+    docName: null,       // 対象ドキュメントのファイル名(resolveTargetDoc用)
+    docFullName: null,   // 対象ドキュメントの保存先フルパス(fsName)。未保存なら null
+    paletteWin: null     // 開いている結果パレットへの参照(多重生成防止用)
+};
+
+// 【重要】ExtendScriptのDOMオブジェクト(Documentなど)は取得のたびに別ラッパーが
+// 返ることがあり、特に永続エンジンでスクリプト呼び出しを跨ぐと同一ドキュメントでも
+// オブジェクト恒等比較(=== / ==)が常にfalseになる。過去のパレット化試行では
+// 「app.activeDocument === STATE.doc」という比較に頼っていたため、通常のアクティブ
+// 切り替え程度でも「対象ドキュメントがアクティブではありません」という誤警告が
+// 出続ける不具合になった。今回はオブジェクト参照を一切保持せず、保存先パス
+// (未保存ならファイル名)という「値」で毎回引き直す設計にする。
+function recordDocIdentity(doc) {
+    STATE.docName = safe(function () { return doc.name; }, null);
+    STATE.docFullName = null;
+    try {
+        // 未保存ドキュメントは fullName へのアクセスが例外になることがあるため、
+        // ここだけ個別に try/catch する(safe()のfallbackだと例外か未保存かの
+        // 区別がつけにくいため明示的に分ける)。
+        STATE.docFullName = doc.fullName.fsName;
+    } catch (eFN) {
+        STATE.docFullName = null;
+    }
+}
+
+// STATEに記録した識別情報(パス優先、無ければファイル名)から、現在開いている
+// ドキュメントの中から対象を探し直す。オブジェクト参照は一切保持しない。
+// - パスが分かっている場合: app.documents を走査してパス一致を探す
+// - パスが無い(未保存だった)場合: ファイル名一致で探す。複数一致は曖昧なため
+//   解決失敗として扱う(誤ったドキュメントを操作しないことを優先)
+// 見つかった場合は app.activeDocument への設定も試みる(失敗しても致命的ではない)。
+// 見つからなければ null を返す(呼び出し側で「見つかりません」表示をすること)。
+function resolveTargetDoc() {
+    try {
+        var docs = app.documents;
+        var found = null;
+        if (STATE.docFullName) {
+            for (var i = 0; i < docs.length; i++) {
+                var d = docs[i];
+                var fp = safe(function () { return d.fullName.fsName; }, null);
+                if (fp !== null && fp === STATE.docFullName) { found = d; break; }
+            }
+        }
+        if (!found && STATE.docName) {
+            var matches = [];
+            for (var j = 0; j < docs.length; j++) {
+                var d2 = docs[j];
+                var nm = safe(function () { return d2.name; }, null);
+                if (nm === STATE.docName) matches.push(d2);
+            }
+            // name一致が複数件ある場合は曖昧なので解決失敗として扱う(誤ったドキュメントを操作しない)
+            if (matches.length === 1) found = matches[0];
+        }
+        if (found) {
+            safe(function () { app.activeDocument = found; return null; }, null);
+        }
+        return found;
+    } catch (eResolve) {
+        return null;
+    }
+}
+
+// Mac対策込みの進捗UI(progressbar + readonly edittextラベル + 中断ボタン)を
+// 指定コンテナに構築して返す。設定ダイアログの初回検版・結果パレットの再検版の
+// 両方で使う共通部品(内容を一箇所にまとめることで実装のズレを防ぐ)。
+function buildProgressGroup(parent) {
+    var g = parent.add("group");
+    g.orientation = "column";
+    g.alignChildren = ["fill", "top"];
+    var bar = g.add("progressbar", undefined, 0, 100);
+    bar.preferredSize.height = 12;
+    bar.alignment = ["fill", "top"]; // 幅はウィンドウに追随
+    // 【Mac対策】statictext + characters では幅確保が効かない(characters は edittext 用の
+    // プロパティで statictext には正式サポートが無い)ため、readonly edittext +
+    // preferredSize.width(ピクセル直接指定)を使う。
+    var label = g.add("edittext", undefined, "", { readonly: true });
+    label.preferredSize.width = 620;
+    label.alignment = ["fill", "top"];
+    var abortRow = g.add("group");
+    var abortBtnLocal = abortRow.add("button", undefined, "中断");
+    abortRow.add("statictext", undefined, "※ ボタンが反応しない場合は ESC キーを押し続けてください(ESCキーで確実に中断できます)");
+    // 注意: ExtendScriptの同期実行中はボタンのクリックイベントが処理されないことがあるため、
+    // 主手段は ESC キーのポーリング(throwIfAborted)。ボタンは補助手段。
+    abortBtnLocal.onClick = function () { ABORT_FLAG.on = true; };
+    g.visible = false;
+    return { group: g, bar: bar, label: label, abortBtn: abortBtnLocal };
+}
+
 function abortKeyPressed() {
     return safe(function () {
         var ks = ScriptUI.environment.keyboardState;
@@ -2236,6 +2335,8 @@ function selectAndZoom(doc, itemsArr) {
 // 13. ScriptUI ダイアログ
 // -----------------------------------------------------------------------------
 
+// 設定ダイアログ(モーダル)。検版を実行して成功したら結果を STATE に保存し、
+// このダイアログを閉じたうえで非モーダルの結果パレット(showResultsPalette)を開く。
 function buildAndShowDialog() {
     var doc = null;
     try {
@@ -2246,10 +2347,12 @@ function buildAndShowDialog() {
     }
 
     var cfg = loadConfig();
+    // このダイアログの呼び出しでは検版が未成功であることを明示しておく
+    // (前回実行分のSTATE.resultsが残っていて誤って再度パレットが開くのを防ぐ)。
+    STATE.results = null;
 
     // タイトルバー表示文字列(バージョン番号を含む)
     var TITLE_SETTINGS = "デジタル検版ツール - DigitalKenpan (v" + KENPAN_VERSION + ")";
-    var TITLE_RESULT_PREFIX = "デジタル検版ツール - 検査結果 (v" + KENPAN_VERSION + ") - ";
 
     // リサイズ可能なダイアログとして生成
     var win = new Window("dialog", TITLE_SETTINGS, undefined, { resizeable: true });
@@ -2263,9 +2366,12 @@ function buildAndShowDialog() {
     headerGroup.add("statictext", undefined, "対象ドキュメント: " + doc.name);
 
     // ---- 画面切替コンテナ ----
-    // 【レイアウト修正】設定/結果パネルを縦に積むと、非表示側のパネルが
+    // 【レイアウト修正】設定/進捗パネルを縦に積むと、非表示側のパネルが
     // レイアウト上のスペースを占有し続けて巨大な余白になるため、
     // stack(重ね)配置にして表示中のパネルだけが領域を使うようにする。
+    // 【パレット化】結果パネル(検査結果の表示)はこのダイアログの外に出し、
+    // 検版成功後に非モーダルの結果パレット(showResultsPalette)として別ウィンドウで開く。
+    // ここに残るのは「事前設定」パネルと、検版実行中だけ表示する軽量な「進捗」パネルの2つ。
     var screens = win.add("group");
     screens.orientation = "stack";
     screens.alignChildren = ["fill", "fill"];
@@ -2277,12 +2383,16 @@ function buildAndShowDialog() {
     settingsPanel.margins = 12;
     settingsPanel.spacing = 6;
 
-    var resultPanel = screens.add("panel", undefined, "検査結果");
-    resultPanel.orientation = "column";
-    resultPanel.alignChildren = ["fill", "top"];
-    resultPanel.margins = 12;
-    resultPanel.spacing = 6;
-    resultPanel.visible = false;
+    var progressPanel = screens.add("panel", undefined, "検査中");
+    progressPanel.orientation = "column";
+    progressPanel.alignChildren = ["fill", "top"];
+    progressPanel.margins = 12;
+    progressPanel.spacing = 6;
+    progressPanel.visible = false;
+    var progressUI = buildProgressGroup(progressPanel);
+    var progressGroup = progressUI.group;
+    var progressBar = progressUI.bar;
+    var progressLabel = progressUI.label;
 
     // ============================= 設定パネル =============================
 
@@ -2639,54 +2749,195 @@ function buildAndShowDialog() {
         applyConfigToUI(c);
     };
 
-    // ============================= 結果パネル =============================
+    // 【パレット化】結果パネル一式(ボタン列/summaryText/splitter付きtree・list等)は
+    // このダイアログから showResultsPalette() に丸ごと移設した。役割は同じだが、
+    // 対象ドキュメントはクロージャの doc ではなく resolveTargetDoc() で毎回引き直す
+    // ようになっている(理由は STATE 定義部のコメントを参照)。
+
+    runBtn.onClick = function () {
+        var c = collectConfigFromUI();
+        saveConfig(c);
+        ABORT_FLAG.on = false; // 中断フラグをリセット
+        settingsPanel.visible = false;
+        progressPanel.visible = true;
+        progressGroup.visible = true; // buildProgressGroup()はデフォルト非表示のため明示的に表示する
+        progressBar.value = 0;
+        progressLabel.text = "";
+        win.layout.layout(true);
+
+        var results = null;
+        var wasAborted = false;
+        var runError = null;
+        try {
+            results = runPreflight(doc, c, function (pct, label) {
+                if (pct !== null && pct !== undefined) progressBar.value = pct;
+                if (label !== null && label !== undefined) {
+                    // Mac対策: 同期実行中のテキスト差し替えが反映されないことがあるため、
+                    // 一度空にしてから代入する(既知のワークアラウンド。Winでは無害)
+                    progressLabel.text = "";
+                    progressLabel.text = label;
+                }
+                win.update();
+                // 【Mac対策・追加】win.update() だけでは同期実行中の再描画が反映されないケースに
+                // 備え、アプリ側の再描画とイベントループへの処理譲渡を試みる(効果が無くても無害)。
+                safe(function () { app.refresh(); return null; }, null);
+                safe(function () { $.sleep(1); return null; }, null);
+            });
+        } catch (e) {
+            if (isAbortError(e)) wasAborted = true;
+            else runError = e;
+        }
+
+        // finally相当の後始末: どのルートでも必ずUI状態を復元する
+        progressPanel.visible = false;
+        progressGroup.visible = false;
+        progressBar.value = 0;
+        progressLabel.text = "";
+
+        if (results) {
+            // 【パレット化】検版成功: 結果をSTATEに保存し、ドキュメント識別情報を記録した上で
+            // この設定ダイアログを閉じる。パレットを開く処理は win.show() の戻り後(下部)で行う
+            // (同一イベントハンドラ内でwin.close()した直後に別ウィンドウを作るのを避けるため)。
+            STATE.results = results;
+            STATE.summary = summarizeResults(results);
+            STATE.cfg = c;
+            recordDocIdentity(doc);
+            win.close();
+        } else {
+            // 中断/エラー時は途中結果を破棄して設定画面へ安全に戻る
+            settingsPanel.visible = true;
+            win.layout.layout(true);
+            applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
+            updateSettingsScrollRange();
+            if (wasAborted) {
+                alert("検版を中断しました。途中結果は破棄されました。");
+            } else if (runError) {
+                alert("検版実行中にエラーが発生しました。\n" + runError.toString());
+            }
+        }
+    };
+
+    // ---- ウィンドウサイズ調整 ----
+    // 【引っかかり対策】以前は onResizing(ドラッグ中の毎イベント)でも win.layout.resize() を
+    // 実行しており、設定画面はコントロール数が多いため毎回の全体再レイアウトが重く、
+    // ドラッグ操作が引っかかっていた。ドラッグ中(onResizing)は何もせず、
+    // サイズ確定時(onResize)のみ処理する。
+    // 【余白累積対策】設定画面では layout.resize() を呼ばない。ScriptUIの再レイアウトは
+    // リサイズを繰り返すと余白が累積することがあるため、設定画面は baseline+差分の
+    // 自前ジオメトリ計算(applySettingsResize)で追随させる。
+    // 【パレット化】結果パネルはこのウィンドウから無くなった(showResultsPalette側に移設、
+    // そちらは独立した win.onResize を持つ)ため、分岐は不要になり常に設定画面側の処理を使う。
+    win.onResizing = function () {};
+    win.onResize = function () {
+        applySettingsResize();
+        updateSettingsScrollRange();
+    };
+    // ダイアログ表示直後: 初回レイアウト確定値を記録し、初期スクロール範囲を計算する。
+    // 【Mac対策】Cocoa側では onShow 発火時点でもネイティブレイアウトが未確定な場合があるため、
+    // 即時実行に加えて app.scheduleTask() で少し遅延させた再計測・再補正も行う
+    // (Windowsでは既に確定済みの値を再測定するだけなので実害はない=冪等)。
+    KENPAN_DEFERRED_SETTINGS_INIT = function () {
+        captureSettingsBaseline();
+        updateSettingsScrollRange(); // 内部で ensureSettingsButtonsVisible() も呼ばれる
+    };
+    win.onShow = function () {
+        KENPAN_DEFERRED_SETTINGS_INIT();
+        safe(function () {
+            app.scheduleTask("KENPAN_DEFERRED_SETTINGS_INIT();", 80, false);
+            return null;
+        }, null);
+    };
+    // 初期高さが画面からはみ出さないよう、画面高の90%を上限にする(Win/Mac共通)
+    var scr = safe(function () { return $.screens[0]; }, null);
+    if (scr) {
+        var maxH = Math.floor((scr.bottom - scr.top) * 0.9);
+        var maxW = Math.floor((scr.right - scr.left) * 0.95);
+        if (maxH > 300 && maxW > 400) {
+            win.maximumSize = [maxW, maxH];
+        }
+    }
+    // 【Mac対策】win.maximumSize は基本的に「ユーザーがドラッグで拡大できる上限」であり、
+    // ウィンドウの初期自動サイズがそれを超えていても自動的には縮められないことがある
+    // (特にMacで顕著。自然サイズのまま画面より大きいウィンドウが生成され、
+    // 画面外にはみ出た下端のボタン列やスクロールバーが見えなくなる、という今回の症状と一致する)。
+    // 表示前に明示的にレイアウトを確定させ、上限を超えていれば強制的に縮めてから表示する。
+    win.layout.layout(true);
+    if (win.maximumSize && win.size) {
+        var clampW = win.size[0] > win.maximumSize[0] ? win.maximumSize[0] : win.size[0];
+        var clampH = win.size[1] > win.maximumSize[1] ? win.maximumSize[1] : win.size[1];
+        if (clampW !== win.size[0] || clampH !== win.size[1]) {
+            win.size = [clampW, clampH];
+            win.layout.layout(true);
+        }
+    }
+    win.center();
+    win.show(); // モーダルなのでここでブロックし、win.close()が呼ばれると戻る
+
+    // 【パレット化】設定ダイアログが閉じた後、検版が成功していれば結果パレットを開く。
+    // (キャンセル/中断/エラーの場合は STATE.results が null のまま=何もしない)
+    if (STATE.results) {
+        showResultsPalette();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 13b. 結果パレット(非モーダル)
+//      #targetengineの永続エンジンにより、設定ダイアログ(モーダル)を閉じた後も
+//      このパレットとイベントハンドラは生存し続け、Illustrator本体(ズーム/パン/
+//      レイヤー操作/編集)と並行して操作できる。
+//      ドキュメントへの参照は一切保持せず、操作のたびに resolveTargetDoc() で
+//      STATE.docFullName/docName から引き直す(理由は STATE 定義部のコメント参照)。
+// -----------------------------------------------------------------------------
+
+function showResultsPalette() {
+    // 既に開いている結果パレットがあれば閉じてから作り直す(多重生成防止)
+    if (STATE.paletteWin) {
+        try { STATE.paletteWin.close(); } catch (eClosePrev) {}
+        STATE.paletteWin = null;
+    }
+
+    var TITLE_RESULT_PREFIX = "デジタル検版ツール - 検査結果 (v" + KENPAN_VERSION + ") - ";
+
+    // パレット(非モーダル)として生成。resizeableはv9の設定画面・結果画面と同様。
+    var win = new Window("palette", TITLE_RESULT_PREFIX + (STATE.docName || ""), undefined, { resizeable: true });
+    win.orientation = "column";
+    win.alignChildren = ["fill", "top"];
+    win.preferredSize.width = 760;
+    win.spacing = 8;
+
+    var resultPanel = win.add("panel", undefined, "検査結果");
+    resultPanel.orientation = "column";
+    resultPanel.alignChildren = ["fill", "top"];
+    resultPanel.margins = 12;
+    resultPanel.spacing = 6;
+
+    // ============================= 結果パネル(v9の構造をそのまま移設) =============================
 
     // ---- 結果画面のボタン列(画面最上部に固定配置) ----
-    // 【v7】設定画面(v6)で「ボタン列を画面最上部に固定配置することで、レイアウト計算の
-    // ズレに関わらずボタンが必ず画面内に入る」ようにした対策と同じ理由・同じ構造を
-    // 結果画面にも適用する。resultPanelの一番最初の子として(native top寄せで)配置。
+    // 【v7】ボタン列を画面最上部に固定配置することで、レイアウト計算のズレに関わらず
+    // ボタンが必ず画面内に入るようにした対策。resultPanelの一番最初の子として配置。
+    // 【パレット化】「設定に戻る」は非モーダル化に伴い意味を持たなくなったため「再検版」に変更。
     var resultBtnGroup = resultPanel.add("group");
     resultBtnGroup.alignment = "right";
-    var backBtn = resultBtnGroup.add("button", undefined, "設定に戻る");
+    var rescanBtn = resultBtnGroup.add("button", undefined, "再検版");
     var saveHtmlBtn = resultBtnGroup.add("button", undefined, "レポート保存(HTML)");
     var saveCsvBtn = resultBtnGroup.add("button", undefined, "レポート保存(CSV)");
-    var closeBtn = resultBtnGroup.add("button", undefined, "閉じる"); // nameは付けない(設定側キャンセルとESC割当が競合するため)
+    var closeBtn = resultBtnGroup.add("button", undefined, "閉じる");
 
     var summaryText = resultPanel.add("statictext", undefined, "");
     summaryText.graphics.font = ScriptUI.newFont("dialog", "Bold", 18);
     var finishSizeText = resultPanel.add("statictext", undefined, "");
     finishSizeText.graphics.font = ScriptUI.newFont("dialog", "Bold", 12);
 
-    var progressGroup = resultPanel.add("group");
-    progressGroup.orientation = "column";
-    progressGroup.alignChildren = ["fill", "top"];
-    var progressBar = progressGroup.add("progressbar", undefined, 0, 100);
-    progressBar.preferredSize.height = 12;
-    progressBar.alignment = ["fill", "top"]; // 幅はウィンドウに追随
-    // 【Mac対策・再修正】v4では statictext + characters=60 で幅確保を試みたが、
-    // "characters" は本来 edittext 用のプロパティであり statictext には正式サポートが無く、
-    // Mac(Cocoa)側で無視されて幅確保が効いていなかった可能性が高い。
-    // 全プラットフォーム共通でサポートされる preferredSize.width をピクセル値で直接指定する方式に変更し、
-    // さらに、動的テキスト更新がstatictextより確実とされる readonly edittext に置き換える
-    // (Mac の ScriptUI では動作中の statictext 差し替えが描画に反映されない既知の癖があるため)。
-    var progressLabel = progressGroup.add("edittext", undefined, "", { readonly: true });
-    progressLabel.preferredSize.width = 620;
-    progressLabel.alignment = ["fill", "top"];
-    var progressAbortRow = progressGroup.add("group");
-    var abortBtn = progressAbortRow.add("button", undefined, "中断");
-    var abortNote = progressAbortRow.add("statictext", undefined, "※ ボタンが反応しない場合は ESC キーを押し続けてください(ESCキーで確実に中断できます)");
-    // 注意: ExtendScriptの同期実行中はボタンのクリックイベントが処理されないことがあるため、
-    // 主手段は ESC キーのポーリング(throwIfAborted)。ボタンは補助手段。
-    abortBtn.onClick = function () { ABORT_FLAG.on = true; };
-    progressGroup.visible = false;
+    // 「再検版」実行中の進捗表示(共通ヘルパーで構築。設定ダイアログの初回検版と同一実装)
+    var progressUI = buildProgressGroup(resultPanel);
+    var progressGroup = progressUI.group;
+    var progressBar = progressUI.bar;
+    var progressLabel = progressUI.label;
 
     // 【v8→v9】項目一覧(ツリー)と検出オブジェクト一覧の境界幅を調整できるようにする。
     // ScriptUIにネイティブのsplitterは無いため、境界バー(splitterBar)へのマウスドラッグで
     // treeContainer.preferredSize.width を書き換える自前実装。
-    // 【v9】段階調整ボタン(「◀ 項目一覧を広げる」「検出オブジェクト一覧を広げる ▶」)は
-    // 「意味不明で不要」とのユーザー指摘により削除した。ドラッグ式splitter(splitterBar)は
-    // 特に苦情が無いため残す。幅変更ロジック(applySplitTreeWidth)自体はドラッグ処理からも
-    // 使う共通ロジックのためそのまま残している。
     var SPLIT_MIN_TREE_W = 150;
     var SPLIT_MIN_LIST_W = 200;
 
@@ -2741,7 +2992,6 @@ function buildAndShowDialog() {
     detailList.alignment = ["fill", "fill"]; // 縦に伸ばした分はここだけが広がる(伸びる対象)
 
     // 【v7】表示順を「検出オブジェクト一覧 → 選択してズームボタン → 説明欄」に変更。
-    // (旧: 一覧 → 説明欄 → ボタン。ボタンが一覧のすぐ下に来るよう並べ替え)
     // 【v8】ボタン・説明欄は高さ固定・fillなしで一覧のすぐ下に密着させる。
     var selectBtnGroup = listContainer.add("group");
     selectBtnGroup.alignment = ["fill", "top"];
@@ -2751,8 +3001,7 @@ function buildAndShowDialog() {
     var noteText = listContainer.add("statictext", undefined, "", { multiline: true });
     noteText.preferredSize = [340, 56];
     noteText.alignment = ["fill", "top"];
-    // 【v8】「原因と対応」の説明文の視認性向上。Illustratorパネルの暗い背景に対してコントラストの
-    // 高い暖色系(アンバー寄り、0〜1スケール)を明示指定し、太字にする。
+    // 【v8】「原因と対応」の説明文の視認性向上。暗い背景に対してコントラストの高い暖色系を明示指定。
     safe(function () {
         noteText.graphics.foregroundColor = noteText.graphics.newPen(
             noteText.graphics.PenType.SOLID_COLOR, [1.0, 0.78, 0.35], 1);
@@ -2775,13 +3024,7 @@ function buildAndShowDialog() {
         } catch (eApply) {}
     }
 
-    // ---- splitter: マウスドラッグ(試験実装) ----
-    // 【既知の制限】この場からはIllustrator実機での動作確認ができないため、
-    // Windows/Mac いずれについても実機での動作確認は取れていない(構文チェックのみ)。
-    // 特にMac(Cocoa)ではmousemoveイベントがドラッグ中に境界バーの外に出た時点で
-    // 届かなくなる可能性がある(v9で段階調整ボタンの代替手段は削除済みのため、
-    // その場合はドラッグでの幅調整ができなくなる)。全ハンドラをtry/catchで保護しており、
-    // 万一失敗してもv7までの固定レイアウトの見た目・動作(初期の3:4比率程度の固定幅)は壊さない。
+    // ---- splitter: マウスドラッグ(試験実装。実機未検証。詳細はv8/v9の完了報告を参照) ----
     var splitDragState = { active: false, startScreenX: 0, startTreeW: 0 };
     function splitDragMove(ev) {
         if (!splitDragState.active) return;
@@ -2800,15 +3043,10 @@ function buildAndShowDialog() {
         });
         splitterBar.addEventListener("mousemove", splitDragMove);
         splitterBar.addEventListener("mouseup", function () { splitDragState.active = false; });
-        // バー外に出てもドラッグを続けられるよう、resultBody側でも同じイベントを拾えるようにする保険
-        // (効かない環境でも他の動作に影響しないようtry/catchで保護済み)
         resultBody.addEventListener("mousemove", splitDragMove);
         resultBody.addEventListener("mouseup", function () { splitDragState.active = false; });
         return null;
     }, null);
-
-    // 【v7】結果画面ボタン列(resultBtnGroup等)は画面最上部に移動済み。
-    // 生成・配置はこのブロックの先頭(resultPanel直後)を参照。
 
     var currentResults = null;
     var currentSummary = null;
@@ -2859,6 +3097,9 @@ function buildAndShowDialog() {
         }
     };
 
+    // 【パレット化・核心】選択してズームは毎回 resolveTargetDoc() でドキュメントを引き直す
+    // (古い参照を保持し続けない)。検版後にドキュメントが編集され pageItem 参照が無効に
+    // なっている場合に備え、例外を捕捉してエラーで落ちないようにする。
     function jumpToSelectedDetails(silent) {
         var sels = detailList.selection;
         if (!sels) { if (!silent) alert("検出オブジェクト一覧から項目を選択してください。"); return; }
@@ -2873,9 +3114,28 @@ function buildAndShowDialog() {
             if (!silent) alert("選択した項目にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
             return;
         }
-        var rep = selectAndZoom(doc, arr);
+        var targetDoc = resolveTargetDoc();
+        if (!targetDoc) {
+            var msgNoDoc = "対象ドキュメントが見つかりません(閉じられた可能性があります)。";
+            selStatusText.text = msgNoDoc;
+            if (!silent) alert(msgNoDoc);
+            return;
+        }
+        var rep;
+        try {
+            rep = selectAndZoom(targetDoc, arr);
+        } catch (eSelZoom) {
+            // selectAndZoom内部は基本的に例外を投げない設計だが、想定外のケースへの保険として捕捉する
+            var msgInvalid = "オブジェクトが見つかりません(検版後にドキュメントが編集され、参照が無効になった可能性があります)。「再検版」を実行すると参照が更新されます。";
+            selStatusText.text = msgInvalid;
+            if (!silent) alert(msgInvalid);
+            return;
+        }
         var statusMsg = rep.count > 0 ? (rep.count + "件を選択しました。") : "選択できませんでした。";
         if (rep.message) statusMsg += "\n" + rep.message;
+        if (rep.count === 0) {
+            statusMsg += "\n(検版後にドキュメントが編集され、参照が無効になった可能性があります。「再検版」を実行すると参照が更新されます。)";
+        }
         selStatusText.text = statusMsg;
     }
 
@@ -2883,11 +3143,10 @@ function buildAndShowDialog() {
     // 行ダブルクリックでもジャンプ(参照が無い行では何もしない)
     detailList.onDoubleClick = function () { jumpToSelectedDetails(true); };
 
-    function showResultsScreen(results) {
+    // v9の showResultsScreen 相当。結果を画面に反映する(初期表示・再検版後の更新の両方から呼ぶ)。
+    function renderResults(results) {
         currentResults = results;
-        currentSummary = summarizeResults(results);
-        settingsPanel.visible = false;
-        resultPanel.visible = true;
+        currentSummary = STATE.summary || summarizeResults(results);
         progressGroup.visible = false;
         summaryText.text = currentSummary.allOk ?
             ("✔ 全項目OK" + (currentSummary.infoCount > 0 ? "(情報 " + currentSummary.infoCount + "件)" : "")) :
@@ -2899,73 +3158,42 @@ function buildAndShowDialog() {
         );
         finishSizeText.text = results.finishSizeText ? ("検出した仕上がりサイズ: " + results.finishSizeText) : "";
         populateTree(results);
-        win.text = TITLE_RESULT_PREFIX + doc.name;
+        win.text = TITLE_RESULT_PREFIX + (STATE.docName || "");
         win.layout.layout(true);
     }
 
-    backBtn.onClick = function () {
-        resultPanel.visible = false;
-        settingsPanel.visible = true;
-        selStatusText.text = "";
-        win.text = TITLE_SETTINGS;
-        win.layout.layout(true);
-        applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
-        updateSettingsScrollRange();
-    };
-
-    saveHtmlBtn.onClick = function () {
-        if (!currentResults) return;
-        var folder = Folder.selectDialog("レポートの保存先フォルダを選択してください");
-        if (!folder) return;
-        var baseName = doc.name.replace(/\.[^\.]+$/, "");
-        var f = new File(folder.fsName + "/" + baseName + "_kenpan_" + nowFileStamp() + ".html");
-        var html = buildHtmlReport(doc, collectConfigFromUI(), currentResults, currentSummary);
-        writeTextFileUTF8BOM(f, html);
-        alert("HTMLレポートを保存しました。\n" + f.fsName);
-    };
-
-    saveCsvBtn.onClick = function () {
-        if (!currentResults) return;
-        var folder2 = Folder.selectDialog("レポートの保存先フォルダを選択してください");
-        if (!folder2) return;
-        var baseName2 = doc.name.replace(/\.[^\.]+$/, "");
-        var f2 = new File(folder2.fsName + "/" + baseName2 + "_kenpan_" + nowFileStamp() + ".csv");
-        var csv = buildCsvReport(doc, collectConfigFromUI(), currentResults);
-        writeTextFileUTF8BOM(f2, csv);
-        alert("CSVレポートを保存しました。\n" + f2.fsName);
-    };
-
-    closeBtn.onClick = function () { win.close(); };
-
-    runBtn.onClick = function () {
-        var c = collectConfigFromUI();
-        saveConfig(c);
-        ABORT_FLAG.on = false; // 中断フラグをリセット
-        settingsPanel.visible = false;
-        resultPanel.visible = true;
+    // 【パレット化・核心】「再検版」: 現在の設定(STATE.cfg)のまま、resolveTargetDoc()で
+    // 解決した最新のドキュメント参照に対して再実行する。設定ダイアログは開かない。
+    rescanBtn.onClick = function () {
+        var targetDoc = resolveTargetDoc();
+        if (!targetDoc) {
+            alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。");
+            return;
+        }
+        if (!STATE.cfg) {
+            alert("設定情報が失われています。お手数ですが、最初から実行し直してください。");
+            return;
+        }
+        ABORT_FLAG.on = false;
+        resultBtnGroup.visible = false;
+        resultBody.visible = false;
         progressGroup.visible = true;
+        progressBar.value = 0;
+        progressLabel.text = "";
         summaryText.text = "検査中...(ESCキーで中断できます)";
         finishSizeText.text = "";
         selStatusText.text = "";
-        resultBody.visible = false;
-        resultBtnGroup.visible = false;
         win.layout.layout(true);
 
-        var results = null;
-        var wasAborted = false;
-        var runError = null;
+        var results = null, wasAborted = false, runError = null;
         try {
-            results = runPreflight(doc, c, function (pct, label) {
+            results = runPreflight(targetDoc, STATE.cfg, function (pct, label) {
                 if (pct !== null && pct !== undefined) progressBar.value = pct;
                 if (label !== null && label !== undefined) {
-                    // Mac対策: 同期実行中のテキスト差し替えが反映されないことがあるため、
-                    // 一度空にしてから代入する(既知のワークアラウンド。Winでは無害)
                     progressLabel.text = "";
                     progressLabel.text = label;
                 }
                 win.update();
-                // 【Mac対策・追加】win.update() だけでは同期実行中の再描画が反映されないケースに
-                // 備え、アプリ側の再描画とイベントループへの処理譲渡を試みる(効果が無くても無害)。
                 safe(function () { app.refresh(); return null; }, null);
                 safe(function () { $.sleep(1); return null; }, null);
             });
@@ -2974,66 +3202,67 @@ function buildAndShowDialog() {
             else runError = e;
         }
 
-        // finally相当の後始末: どのルートでも必ずUI状態を復元する
         progressGroup.visible = false;
         progressBar.value = 0;
         progressLabel.text = "";
+        resultBtnGroup.visible = true;
+        resultBody.visible = true;
 
         if (results) {
-            resultBody.visible = true;
-            resultBtnGroup.visible = true;
-            showResultsScreen(results);
+            STATE.results = results;
+            STATE.summary = summarizeResults(results);
+            recordDocIdentity(targetDoc);
+            renderResults(results);
         } else {
-            // 中断/エラー時は途中結果を破棄して設定画面へ安全に戻る
-            resultPanel.visible = false;
-            settingsPanel.visible = true;
-            summaryText.text = "";
-            win.text = TITLE_SETTINGS;
-            win.layout.layout(true);
-            applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
-            updateSettingsScrollRange();
+            // 再検版が失敗/中断した場合、直前の結果をそのまま表示し続ける(破棄しない)
+            renderResults(currentResults || STATE.results);
             if (wasAborted) {
-                alert("検版を中断しました。途中結果は破棄されました。");
+                alert("再検版を中断しました。表示中の結果は直前のものです。");
             } else if (runError) {
-                alert("検版実行中にエラーが発生しました。\n" + runError.toString());
+                alert("再検版中にエラーが発生しました。\n" + runError.toString());
             }
         }
     };
 
+    saveHtmlBtn.onClick = function () {
+        if (!currentResults) return;
+        var targetDoc = resolveTargetDoc();
+        if (!targetDoc) { alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。"); return; }
+        var folder = Folder.selectDialog("レポートの保存先フォルダを選択してください");
+        if (!folder) return;
+        var baseName = targetDoc.name.replace(/\.[^\.]+$/, "");
+        var f = new File(folder.fsName + "/" + baseName + "_kenpan_" + nowFileStamp() + ".html");
+        var html = buildHtmlReport(targetDoc, STATE.cfg || defaultConfig(), currentResults, currentSummary);
+        writeTextFileUTF8BOM(f, html);
+        alert("HTMLレポートを保存しました。\n" + f.fsName);
+    };
+
+    saveCsvBtn.onClick = function () {
+        if (!currentResults) return;
+        var targetDoc = resolveTargetDoc();
+        if (!targetDoc) { alert("対象ドキュメントが見つかりません(閉じられた可能性があります)。"); return; }
+        var folder2 = Folder.selectDialog("レポートの保存先フォルダを選択してください");
+        if (!folder2) return;
+        var baseName2 = targetDoc.name.replace(/\.[^\.]+$/, "");
+        var f2 = new File(folder2.fsName + "/" + baseName2 + "_kenpan_" + nowFileStamp() + ".csv");
+        var csv = buildCsvReport(targetDoc, STATE.cfg || defaultConfig(), currentResults);
+        writeTextFileUTF8BOM(f2, csv);
+        alert("CSVレポートを保存しました。\n" + f2.fsName);
+    };
+
+    closeBtn.onClick = function () { win.close(); }; // パレットを閉じるだけ(スクリプト自体は継続)
+
     // ---- ウィンドウサイズ調整 ----
-    // 【引っかかり対策】以前は onResizing(ドラッグ中の毎イベント)でも win.layout.resize() を
-    // 実行しており、設定画面はコントロール数が多いため毎回の全体再レイアウトが重く、
-    // ドラッグ操作が引っかかっていた。ドラッグ中(onResizing)は何もせず、
-    // サイズ確定時(onResize)のみ処理する。
-    // 【余白累積対策】設定画面では layout.resize() を呼ばない。ScriptUIの再レイアウトは
-    // リサイズを繰り返すと余白が累積することがあるため、設定画面は baseline+差分の
-    // 自前ジオメトリ計算(applySettingsResize)で追随させる。結果画面はツリー/リストの
-    // 伸縮に自動レイアウトが必要なため従来通り layout.resize() を使う。
+    // 結果パレットはツリー/リストの伸縮に自動レイアウトが必要なため、v9同様 layout.resize() を使う
+    // (設定画面のような baseline+差分方式ではない)。
     win.onResizing = function () {};
-    win.onResize = function () {
-        if (resultPanel.visible) {
-            this.layout.resize();
-        } else {
-            applySettingsResize();
-        }
-        updateSettingsScrollRange();
+    win.onResize = function () { this.layout.resize(); };
+    win.onClose = function () {
+        // 多重生成防止用の参照をクリアする(次回 showResultsPalette() 呼び出し時の判定に使う)
+        STATE.paletteWin = null;
     };
-    // ダイアログ表示直後: 初回レイアウト確定値を記録し、初期スクロール範囲を計算する。
-    // 【Mac対策】Cocoa側では onShow 発火時点でもネイティブレイアウトが未確定な場合があるため、
-    // 即時実行に加えて app.scheduleTask() で少し遅延させた再計測・再補正も行う
-    // (Windowsでは既に確定済みの値を再測定するだけなので実害はない=冪等)。
-    KENPAN_DEFERRED_SETTINGS_INIT = function () {
-        captureSettingsBaseline();
-        updateSettingsScrollRange(); // 内部で ensureSettingsButtonsVisible() も呼ばれる
-    };
-    win.onShow = function () {
-        KENPAN_DEFERRED_SETTINGS_INIT();
-        safe(function () {
-            app.scheduleTask("KENPAN_DEFERRED_SETTINGS_INIT();", 80, false);
-            return null;
-        }, null);
-    };
-    // 初期高さが画面からはみ出さないよう、画面高の90%を上限にする(Win/Mac共通)
+
+    // 初期高さ/幅が画面からはみ出さないよう、画面の90%/95%を上限にする(設定ダイアログと同様)
     var scr = safe(function () { return $.screens[0]; }, null);
     if (scr) {
         var maxH = Math.floor((scr.bottom - scr.top) * 0.9);
@@ -3042,11 +3271,6 @@ function buildAndShowDialog() {
             win.maximumSize = [maxW, maxH];
         }
     }
-    // 【Mac対策】win.maximumSize は基本的に「ユーザーがドラッグで拡大できる上限」であり、
-    // ウィンドウの初期自動サイズがそれを超えていても自動的には縮められないことがある
-    // (特にMacで顕著。自然サイズのまま画面より大きいウィンドウが生成され、
-    // 画面外にはみ出た下端のボタン列やスクロールバーが見えなくなる、という今回の症状と一致する)。
-    // 表示前に明示的にレイアウトを確定させ、上限を超えていれば強制的に縮めてから表示する。
     win.layout.layout(true);
     if (win.maximumSize && win.size) {
         var clampW = win.size[0] > win.maximumSize[0] ? win.maximumSize[0] : win.size[0];
@@ -3056,8 +3280,13 @@ function buildAndShowDialog() {
             win.layout.layout(true);
         }
     }
+
+    // 初期表示に検版結果を反映する
+    renderResults(STATE.results);
+
     win.center();
-    win.show();
+    win.show(); // paletteは非モーダルなのですぐ戻る
+    STATE.paletteWin = win;
 }
 
 // -----------------------------------------------------------------------------
