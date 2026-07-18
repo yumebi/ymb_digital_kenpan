@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.8.0";
+var KENPAN_VERSION = "1.9.0";
 
 // -----------------------------------------------------------------------------
 // 0. 基本ユーティリティ
@@ -2680,20 +2680,15 @@ function buildAndShowDialog() {
     abortBtn.onClick = function () { ABORT_FLAG.on = true; };
     progressGroup.visible = false;
 
-    // 【v8】項目一覧(ツリー)と検出オブジェクト一覧の境界幅を調整できるようにする。
+    // 【v8→v9】項目一覧(ツリー)と検出オブジェクト一覧の境界幅を調整できるようにする。
     // ScriptUIにネイティブのsplitterは無いため、境界バー(splitterBar)へのマウスドラッグで
-    // treeContainer.preferredSize.width を書き換える自前実装を試みる。
-    // Mac(Cocoa)ではmousemoveがバー外に出ると届かない可能性があり実機未検証のため、
-    // 保険として「◀ 項目一覧を広げる / 検出オブジェクト一覧を広げる ▶」の段階調整ボタンも
-    // 併設する(こちらは通常のボタンクリックのみで完結するため確実に動作する)。
+    // treeContainer.preferredSize.width を書き換える自前実装。
+    // 【v9】段階調整ボタン(「◀ 項目一覧を広げる」「検出オブジェクト一覧を広げる ▶」)は
+    // 「意味不明で不要」とのユーザー指摘により削除した。ドラッグ式splitter(splitterBar)は
+    // 特に苦情が無いため残す。幅変更ロジック(applySplitTreeWidth)自体はドラッグ処理からも
+    // 使う共通ロジックのためそのまま残している。
     var SPLIT_MIN_TREE_W = 150;
     var SPLIT_MIN_LIST_W = 200;
-    var SPLIT_STEP = 40;
-
-    var splitAdjustRow = resultPanel.add("group");
-    splitAdjustRow.alignment = ["right", "top"];
-    var splitLeftBtn = splitAdjustRow.add("button", undefined, "◀ 項目一覧を広げる");
-    var splitRightBtn = splitAdjustRow.add("button", undefined, "検出オブジェクト一覧を広げる ▶");
 
     var resultBody = resultPanel.add("group");
     resultBody.orientation = "row";
@@ -2768,7 +2763,7 @@ function buildAndShowDialog() {
     selStatusText.preferredSize = [340, 42];
     selStatusText.alignment = ["fill", "top"];
 
-    // ---- splitter: 幅の適用/クランプ処理(ドラッグ・段階ボタン共通) ----
+    // ---- splitter: 幅の適用/クランプ処理(ドラッグ処理から使用) ----
     function applySplitTreeWidth(newW) {
         try {
             var totalW = resultBody.size ? resultBody.size[0] : (treeContainer.size[0] + listContainer.size[0] + 16);
@@ -2779,22 +2774,14 @@ function buildAndShowDialog() {
             win.layout.layout(true);
         } catch (eApply) {}
     }
-    splitLeftBtn.onClick = function () {
-        var curW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
-        applySplitTreeWidth(curW + SPLIT_STEP);
-    };
-    splitRightBtn.onClick = function () {
-        var curW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
-        applySplitTreeWidth(curW - SPLIT_STEP);
-    };
 
     // ---- splitter: マウスドラッグ(試験実装) ----
     // 【既知の制限】この場からはIllustrator実機での動作確認ができないため、
     // Windows/Mac いずれについても実機での動作確認は取れていない(構文チェックのみ)。
     // 特にMac(Cocoa)ではmousemoveイベントがドラッグ中に境界バーの外に出た時点で
-    // 届かなくなる可能性がある(その場合、ドラッグでは反応しないが上記の段階調整ボタンで
-    // 代替できるため、機能自体が失われることはない)。全ハンドラをtry/catchで保護し、
-    // 万一失敗してもv7までの固定レイアウトの見た目・動作を壊さない設計にしている。
+    // 届かなくなる可能性がある(v9で段階調整ボタンの代替手段は削除済みのため、
+    // その場合はドラッグでの幅調整ができなくなる)。全ハンドラをtry/catchで保護しており、
+    // 万一失敗してもv7までの固定レイアウトの見た目・動作(初期の3:4比率程度の固定幅)は壊さない。
     var splitDragState = { active: false, startScreenX: 0, startTreeW: 0 };
     function splitDragMove(ev) {
         if (!splitDragState.active) return;
