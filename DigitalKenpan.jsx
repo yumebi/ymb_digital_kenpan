@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.7.0";
+var KENPAN_VERSION = "1.8.0";
 
 // -----------------------------------------------------------------------------
 // 0. 基本ユーティリティ
@@ -2680,41 +2680,145 @@ function buildAndShowDialog() {
     abortBtn.onClick = function () { ABORT_FLAG.on = true; };
     progressGroup.visible = false;
 
+    // 【v8】項目一覧(ツリー)と検出オブジェクト一覧の境界幅を調整できるようにする。
+    // ScriptUIにネイティブのsplitterは無いため、境界バー(splitterBar)へのマウスドラッグで
+    // treeContainer.preferredSize.width を書き換える自前実装を試みる。
+    // Mac(Cocoa)ではmousemoveがバー外に出ると届かない可能性があり実機未検証のため、
+    // 保険として「◀ 項目一覧を広げる / 検出オブジェクト一覧を広げる ▶」の段階調整ボタンも
+    // 併設する(こちらは通常のボタンクリックのみで完結するため確実に動作する)。
+    var SPLIT_MIN_TREE_W = 150;
+    var SPLIT_MIN_LIST_W = 200;
+    var SPLIT_STEP = 40;
+
+    var splitAdjustRow = resultPanel.add("group");
+    splitAdjustRow.alignment = ["right", "top"];
+    var splitLeftBtn = splitAdjustRow.add("button", undefined, "◀ 項目一覧を広げる");
+    var splitRightBtn = splitAdjustRow.add("button", undefined, "検出オブジェクト一覧を広げる ▶");
+
     var resultBody = resultPanel.add("group");
     resultBody.orientation = "row";
     resultBody.alignChildren = ["fill", "fill"];
     resultBody.alignment = ["fill", "fill"]; // ウィンドウリサイズ時に伸縮する主領域
+    resultBody.spacing = 2;
 
     var treeContainer = resultBody.add("panel", undefined, "項目一覧");
     treeContainer.alignChildren = ["fill", "fill"];
-    treeContainer.alignment = ["fill", "fill"];
+    // 【v8】splitterで幅を制御するため、横方向は fill にせず自前のpreferredSize.widthに従わせる
+    // (残りの幅は listContainer 側が fill で吸収する)。
+    treeContainer.alignment = ["left", "fill"];
+    treeContainer.preferredSize.width = 340;
+    treeContainer.minimumSize.width = SPLIT_MIN_TREE_W;
     var tree = treeContainer.add("treeview", undefined);
     tree.preferredSize = [340, 240]; // 初期は控えめ。リサイズで拡大可能
     tree.alignment = ["fill", "fill"];
 
+    // ---- ドラッグ可能な境界バー ----
+    var splitterBar = resultBody.add("group");
+    splitterBar.orientation = "column";
+    splitterBar.alignChildren = ["fill", "fill"];
+    splitterBar.alignment = ["left", "fill"];
+    splitterBar.preferredSize.width = 8;
+    splitterBar.minimumSize.width = 8;
+    splitterBar.maximumSize.width = 8;
+    splitterBar.margins = 0;
+    // 視覚的に「掴める場所」とわかるよう、明るめの縦線をbackgroundColorで描画する
+    // (プロパティが無視される環境でも例外にならないようsafe()で保護)
+    safe(function () {
+        splitterBar.graphics.backgroundColor = splitterBar.graphics.newBrush(
+            splitterBar.graphics.BrushType.SOLID_COLOR, [0.55, 0.55, 0.55], 1);
+        return null;
+    }, null);
+
     var listContainer = resultBody.add("panel", undefined, "検出オブジェクト一覧");
     listContainer.orientation = "column";
+    // 【v8修正】ウィンドウを縦に伸ばすと一覧/ボタン/説明欄の間隔が広がる問題への対策。
+    // alignChildrenは["fill","top"]のままだが、各子要素の alignment を明示指定に変える
+    // (継承任せにしない)。fillを持つのは detailList だけにし、他は top固定で
+    // 一覧のすぐ下に密着させる。伸ばした分は detailList だけが広がって吸収する。
     listContainer.alignChildren = ["fill", "top"];
     listContainer.alignment = ["fill", "fill"];
-    // 【v7】検出オブジェクト一覧が狭く見づらいとの指摘のため、初期サイズ・最小サイズを拡大。
-    // ツリーとの境界をドラッグで調整できるsplitterの簡易実装も検討したが、ScriptUIにはネイティブの
-    // splitterが無く、マウスドラッグの追跡をMacで安定動作させる自信が持てなかったため見送り、
-    // 代わりに一覧自体の確保サイズを大きくする妥協案を採用(コーディネータ承認済みの代替案)。
+    listContainer.spacing = 6; // 間隔を固定値にして曖昧な継承由来のズレを排除
+    listContainer.minimumSize.width = SPLIT_MIN_LIST_W;
+    // 【v7→v8】検出オブジェクト一覧が狭く見づらいとの指摘のため、初期サイズ・最小サイズを拡大。
     var detailList = listContainer.add("listbox", undefined, [], { multiselect: true });
     detailList.preferredSize = [380, 320]; // 従来[340,150]から拡大
     detailList.minimumSize = [280, 200];   // ウィンドウ縮小時でもこれ以上潰れない下限
-    detailList.alignment = ["fill", "fill"]; // ウィンドウリサイズに追随して拡大
+    detailList.alignment = ["fill", "fill"]; // 縦に伸ばした分はここだけが広がる(伸びる対象)
 
     // 【v7】表示順を「検出オブジェクト一覧 → 選択してズームボタン → 説明欄」に変更。
     // (旧: 一覧 → 説明欄 → ボタン。ボタンが一覧のすぐ下に来るよう並べ替え)
+    // 【v8】ボタン・説明欄は高さ固定・fillなしで一覧のすぐ下に密着させる。
     var selectBtnGroup = listContainer.add("group");
+    selectBtnGroup.alignment = ["fill", "top"];
     var selectBtn = selectBtnGroup.add("button", undefined, "選択してズーム");
     selectBtnGroup.add("statictext", undefined, "(行のダブルクリックでもジャンプします)");
 
     var noteText = listContainer.add("statictext", undefined, "", { multiline: true });
     noteText.preferredSize = [340, 56];
+    noteText.alignment = ["fill", "top"];
+    // 【v8】「原因と対応」の説明文の視認性向上。Illustratorパネルの暗い背景に対してコントラストの
+    // 高い暖色系(アンバー寄り、0〜1スケール)を明示指定し、太字にする。
+    safe(function () {
+        noteText.graphics.foregroundColor = noteText.graphics.newPen(
+            noteText.graphics.PenType.SOLID_COLOR, [1.0, 0.78, 0.35], 1);
+        noteText.graphics.font = ScriptUI.newFont("dialog", "Bold", 12);
+        return null;
+    }, null);
     var selStatusText = listContainer.add("statictext", undefined, "", { multiline: true });
     selStatusText.preferredSize = [340, 42];
+    selStatusText.alignment = ["fill", "top"];
+
+    // ---- splitter: 幅の適用/クランプ処理(ドラッグ・段階ボタン共通) ----
+    function applySplitTreeWidth(newW) {
+        try {
+            var totalW = resultBody.size ? resultBody.size[0] : (treeContainer.size[0] + listContainer.size[0] + 16);
+            var maxTreeW = totalW - SPLIT_MIN_LIST_W - splitterBar.size[0] - 8;
+            if (newW < SPLIT_MIN_TREE_W) newW = SPLIT_MIN_TREE_W;
+            if (maxTreeW > SPLIT_MIN_TREE_W && newW > maxTreeW) newW = maxTreeW;
+            treeContainer.preferredSize.width = newW;
+            win.layout.layout(true);
+        } catch (eApply) {}
+    }
+    splitLeftBtn.onClick = function () {
+        var curW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
+        applySplitTreeWidth(curW + SPLIT_STEP);
+    };
+    splitRightBtn.onClick = function () {
+        var curW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
+        applySplitTreeWidth(curW - SPLIT_STEP);
+    };
+
+    // ---- splitter: マウスドラッグ(試験実装) ----
+    // 【既知の制限】この場からはIllustrator実機での動作確認ができないため、
+    // Windows/Mac いずれについても実機での動作確認は取れていない(構文チェックのみ)。
+    // 特にMac(Cocoa)ではmousemoveイベントがドラッグ中に境界バーの外に出た時点で
+    // 届かなくなる可能性がある(その場合、ドラッグでは反応しないが上記の段階調整ボタンで
+    // 代替できるため、機能自体が失われることはない)。全ハンドラをtry/catchで保護し、
+    // 万一失敗してもv7までの固定レイアウトの見た目・動作を壊さない設計にしている。
+    var splitDragState = { active: false, startScreenX: 0, startTreeW: 0 };
+    function splitDragMove(ev) {
+        if (!splitDragState.active) return;
+        try {
+            var curX = (ev && ev.screenX !== undefined && ev.screenX !== null) ? ev.screenX : splitDragState.startScreenX;
+            applySplitTreeWidth(splitDragState.startTreeW + (curX - splitDragState.startScreenX));
+        } catch (eSM) {}
+    }
+    safe(function () {
+        splitterBar.addEventListener("mousedown", function (ev) {
+            try {
+                splitDragState.active = true;
+                splitDragState.startScreenX = (ev && ev.screenX !== undefined && ev.screenX !== null) ? ev.screenX : 0;
+                splitDragState.startTreeW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
+            } catch (eSD) {}
+        });
+        splitterBar.addEventListener("mousemove", splitDragMove);
+        splitterBar.addEventListener("mouseup", function () { splitDragState.active = false; });
+        // バー外に出てもドラッグを続けられるよう、resultBody側でも同じイベントを拾えるようにする保険
+        // (効かない環境でも他の動作に影響しないようtry/catchで保護済み)
+        resultBody.addEventListener("mousemove", splitDragMove);
+        resultBody.addEventListener("mouseup", function () { splitDragState.active = false; });
+        return null;
+    }, null);
 
     // 【v7】結果画面ボタン列(resultBtnGroup等)は画面最上部に移動済み。
     // 生成・配置はこのブロックの先頭(resultPanel直後)を参照。
