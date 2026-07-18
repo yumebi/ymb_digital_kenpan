@@ -18,6 +18,10 @@
 
 (function () {
 
+// バージョン表示用。修正のたびにこの値を更新する運用とする。
+// (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
+var KENPAN_VERSION = "1.6.0";
+
 // -----------------------------------------------------------------------------
 // 0. 基本ユーティリティ
 // -----------------------------------------------------------------------------
@@ -2009,7 +2013,7 @@ function buildHtmlReport(doc, cfg, results, summary) {
     html += "ul{margin:4px 0;padding-left:20px;} li{font-size:12px;margin-bottom:2px;}\n";
     html += "</style></head><body>\n";
     html += "<h1>デジタル検版レポート</h1>\n";
-    html += "<p>ファイル名: " + escapeHtml(doc.name) + " / 出力日時: " + nowString() + "</p>\n";
+    html += "<p>ファイル名: " + escapeHtml(doc.name) + " / 出力日時: " + nowString() + " / ツールバージョン: v" + escapeHtml(KENPAN_VERSION) + "</p>\n";
 
     var overallClass = summary.allOk ? "ok" : "ng";
     var overallText = summary.allOk ?
@@ -2067,6 +2071,8 @@ function buildHtmlReport(doc, cfg, results, summary) {
 
 function buildCsvReport(doc, cfg, results) {
     var lines = [];
+    // ファイル冒頭のメタ情報欄(ツールバージョン等)。1列のみの行として先頭に付与する。
+    lines.push(escapeCsv("# DigitalKenpan v" + KENPAN_VERSION + " / ファイル名: " + doc.name + " / 出力日時: " + nowString()));
     lines.push(joinArr([escapeCsv("カテゴリ"), escapeCsv("項目"), escapeCsv("判定"), escapeCsv("概要"), escapeCsv("検出内容"), escapeCsv("原因と対応"), escapeCsv("備考")], ","));
     for (var i = 0; i < results.length; i++) {
         var r = results[i];
@@ -2241,8 +2247,12 @@ function buildAndShowDialog() {
 
     var cfg = loadConfig();
 
+    // タイトルバー表示文字列(バージョン番号を含む)
+    var TITLE_SETTINGS = "デジタル検版ツール - DigitalKenpan (v" + KENPAN_VERSION + ")";
+    var TITLE_RESULT_PREFIX = "デジタル検版ツール - 検査結果 (v" + KENPAN_VERSION + ") - ";
+
     // リサイズ可能なダイアログとして生成
-    var win = new Window("dialog", "デジタル検版ツール - DigitalKenpan", undefined, { resizeable: true });
+    var win = new Window("dialog", TITLE_SETTINGS, undefined, { resizeable: true });
     win.orientation = "column";
     win.alignChildren = ["fill", "top"];
     win.preferredSize.width = 760;
@@ -2276,11 +2286,32 @@ function buildAndShowDialog() {
 
     // ============================= 設定パネル =============================
 
+    // ---- 設定 保存/読込ボタン(画面最上部に固定配置) ----
+    // 【v6】Mac実機でウィンドウ最下部のボタン列・スクロールバーが表示されない問題が
+    // v5の対策後も再発したため、方針を転換。ボタン列を「対象ドキュメント名のすぐ下・
+    // 事前設定パネル群より上」に移動する。settingsPanelの一番最初の子として
+    // (native top寄せで)配置することで、レイアウト計算がどうズレてもウィンドウの
+    // 一番上にあるボタンだけは常に画面内に入ることを構造的に保証する。
+    // スクロール領域(settingsViewportRow)の外に置く点は従来どおり。
+    var settingsBtnGroup = settingsPanel.add("group");
+    settingsBtnGroup.alignment = "right";
+    var loadBtn = settingsBtnGroup.add("button", undefined, "設定を読込");
+    var saveBtn = settingsBtnGroup.add("button", undefined, "設定を保存");
+    var cancelBtn = settingsBtnGroup.add("button", undefined, "キャンセル", { name: "cancel" });
+    var runBtn = settingsBtnGroup.add("button", undefined, "検版実行", { name: "ok" });
+    // ESC=キャンセル / Enter=検版実行
+    win.cancelElement = cancelBtn;
+    win.defaultElement = runBtn;
+    cancelBtn.onClick = function () {
+        // 何もせず終了(設定も保存しない)
+        win.close();
+    };
+
     // ---- スクロール用ビューポート ----
-    // ウィンドウを縮小すると設定項目や下部ボタンが隠れて操作不能になる問題への対処。
+    // ウィンドウを縮小すると設定項目が隠れて操作不能になる問題への対処。
     // ScriptUIにはネイティブのスクロールコンテナが無いため、定番の手法(固定/fill枠でクリッピングし、
     // 内側コンテンツの location.y をスクロールバーでシフトする)で実現する。
-    // 下部のボタン列(settingsBtnGroup)はこのビューポートの外に配置し、常に表示されるようにする。
+    // ボタン列(settingsBtnGroup)は上で既に配置済み(このビューポートの外・画面最上部)。
     var settingsViewportRow = settingsPanel.add("group");
     settingsViewportRow.orientation = "row";
     settingsViewportRow.alignChildren = ["fill", "fill"];
@@ -2353,8 +2384,10 @@ function buildAndShowDialog() {
                 rowW: settingsViewportRow.size[0], rowH: settingsViewportRow.size[1],
                 vpW: settingsViewport.size[0], vpH: settingsViewport.size[1],
                 sbX: settingsScrollbar.location[0], sbY: settingsScrollbar.location[1],
-                sbH: settingsScrollbar.size[1],
-                btnX: settingsBtnGroup.location[0], btnY: settingsBtnGroup.location[1]
+                sbH: settingsScrollbar.size[1]
+                // 【v6】ボタン列は画面最上部に固定配置に変更したため、
+                // baselineでの位置記録・差分再配置の対象から外した(常にネイティブlayoutの
+                // top寄せに任せる。詳細はensureSettingsButtonsVisible()を参照)。
             };
         } catch (eCap) {}
     }
@@ -2372,37 +2405,26 @@ function buildAndShowDialog() {
             settingsViewport.size = [Math.max(80, settingsBaseline.vpW + dw), Math.max(40, settingsBaseline.vpH + dh)];
             settingsScrollbar.size = [settingsScrollbar.size[0], Math.max(40, settingsBaseline.sbH + dh)];
             settingsScrollbar.location = [settingsBaseline.sbX + dw, settingsBaseline.sbY];
-            // 下部ボタン列は常に右下に固定(baselineの位置+差分。前回位置は参照しない)
-            settingsBtnGroup.location = [Math.max(0, settingsBaseline.btnX + dw), Math.max(0, settingsBaseline.btnY + dh)];
+            // 【v6】ボタン列は settingsPanel の最初の子(画面最上部)に固定配置しており、
+            // サイズも位置も window リサイズの影響を受けない(常にネイティブlayoutのtop寄せ)ため、
+            // ここでの再配置は不要になった。
         } catch (eRsz) {}
     }
 
-    // 【最終防衛策】baseline計算やOS依存のタイミング問題の原因が何であれ、
-    // 「ボタン列が画面外に出ない」ことだけは無条件に保証する。
-    // settingsPanel自身の実測サイズ(そのままwin内に収まっているはず)を基準に、
-    // ボタン列の下端がパネル内に収まっているかを直接検証し、はみ出ていれば強制的に引き戻す。
-    // baselineの正しさに依存しないため、原因不明のケースでも効く。
+    // 【v6・最終防衛策】ボタン列は settingsPanel の一番最初の子として配置しているため、
+    // 通常はネイティブレイアウトにより常にパネル最上部(location.y ≈ 0)に固定表示される
+    // ―― ウィンドウの一番上は縮小・リサイズ計算がどうズレても必ず画面内に入るため、
+    // 「下部に置く限り消えるリスクが残る」問題を構造的に解消できる。
+    // 万一(何らかの理由で)この前提が崩れて上端からずれた場合に備え、強制的に引き戻す保険を残す。
     function ensureSettingsButtonsVisible() {
         try {
-            if (!settingsPanel.size || !settingsBtnGroup.size || !settingsBtnGroup.location) return;
-            var panelH = settingsPanel.size[1];
-            var marginBottom = 12; // settingsPanel.margins(=12)に合わせた下端余白
-            var usableH = panelH - marginBottom;
-            var btnH = settingsBtnGroup.size[1];
+            if (!settingsBtnGroup.location) return;
             var btnTop = settingsBtnGroup.location[1];
-            var btnBottom = btnTop + btnH;
-            if (btnBottom > usableH || btnTop < 0 || btnH <= 0) {
-                var desiredBtnY = usableH - btnH;
-                if (desiredBtnY < 0) desiredBtnY = 0;
-                settingsBtnGroup.location = [settingsBtnGroup.location[0], desiredBtnY];
-                // ビューポート/スクロールバーもボタン上端までに収まるよう縮小して整合させる
-                var vpLoc = settingsViewport.location;
-                var topY = vpLoc ? vpLoc[1] : 0;
-                var vpH2 = desiredBtnY - topY - 4;
-                if (vpH2 < 40) vpH2 = 40;
-                settingsViewport.size = [settingsViewport.size[0], vpH2];
-                settingsScrollbar.size = [settingsScrollbar.size[0], vpH2];
+            if (btnTop === undefined || btnTop === null || isNaN(btnTop) || btnTop < 0 || btnTop > 4) {
+                settingsBtnGroup.location = [settingsBtnGroup.location[0], 0];
             }
+            if (settingsBtnGroup.visible === false) settingsBtnGroup.visible = true;
+            if (settingsBtnGroup.enabled === false) settingsBtnGroup.enabled = true;
         } catch (eEnsure) {}
     }
 
@@ -2552,20 +2574,8 @@ function buildAndShowDialog() {
         checkBoxes[id] = cb;
     }
 
-    // --- 設定 保存/読込ボタン ---
-    var settingsBtnGroup = settingsPanel.add("group");
-    settingsBtnGroup.alignment = "right";
-    var loadBtn = settingsBtnGroup.add("button", undefined, "設定を読込");
-    var saveBtn = settingsBtnGroup.add("button", undefined, "設定を保存");
-    var cancelBtn = settingsBtnGroup.add("button", undefined, "キャンセル", { name: "cancel" });
-    var runBtn = settingsBtnGroup.add("button", undefined, "検版実行", { name: "ok" });
-    // ESC=キャンセル / Enter=検版実行
-    win.cancelElement = cancelBtn;
-    win.defaultElement = runBtn;
-    cancelBtn.onClick = function () {
-        // 何もせず終了(設定も保存しない)
-        win.close();
-    };
+    // 【v6】設定 保存/読込ボタン(settingsBtnGroup等)は設定画面の一番上に移動済み。
+    // 生成・onClick割当は buildAndShowDialog冒頭(settingsPanel直後)を参照。
 
     function collectConfigFromUI() {
         var c = defaultConfig();
@@ -2782,7 +2792,7 @@ function buildAndShowDialog() {
         );
         finishSizeText.text = results.finishSizeText ? ("検出した仕上がりサイズ: " + results.finishSizeText) : "";
         populateTree(results);
-        win.text = "デジタル検版ツール - 検査結果 - " + doc.name;
+        win.text = TITLE_RESULT_PREFIX + doc.name;
         win.layout.layout(true);
     }
 
@@ -2790,7 +2800,7 @@ function buildAndShowDialog() {
         resultPanel.visible = false;
         settingsPanel.visible = true;
         selStatusText.text = "";
-        win.text = "デジタル検版ツール - DigitalKenpan";
+        win.text = TITLE_SETTINGS;
         win.layout.layout(true);
         applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
         updateSettingsScrollRange();
@@ -2871,7 +2881,7 @@ function buildAndShowDialog() {
             resultPanel.visible = false;
             settingsPanel.visible = true;
             summaryText.text = "";
-            win.text = "デジタル検版ツール - DigitalKenpan";
+            win.text = TITLE_SETTINGS;
             win.layout.layout(true);
             applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
             updateSettingsScrollRange();
