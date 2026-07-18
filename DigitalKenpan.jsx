@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.6.0";
+var KENPAN_VERSION = "1.7.0";
 
 // -----------------------------------------------------------------------------
 // 0. 基本ユーティリティ
@@ -2641,6 +2641,17 @@ function buildAndShowDialog() {
 
     // ============================= 結果パネル =============================
 
+    // ---- 結果画面のボタン列(画面最上部に固定配置) ----
+    // 【v7】設定画面(v6)で「ボタン列を画面最上部に固定配置することで、レイアウト計算の
+    // ズレに関わらずボタンが必ず画面内に入る」ようにした対策と同じ理由・同じ構造を
+    // 結果画面にも適用する。resultPanelの一番最初の子として(native top寄せで)配置。
+    var resultBtnGroup = resultPanel.add("group");
+    resultBtnGroup.alignment = "right";
+    var backBtn = resultBtnGroup.add("button", undefined, "設定に戻る");
+    var saveHtmlBtn = resultBtnGroup.add("button", undefined, "レポート保存(HTML)");
+    var saveCsvBtn = resultBtnGroup.add("button", undefined, "レポート保存(CSV)");
+    var closeBtn = resultBtnGroup.add("button", undefined, "閉じる"); // nameは付けない(設定側キャンセルとESC割当が競合するため)
+
     var summaryText = resultPanel.add("statictext", undefined, "");
     summaryText.graphics.font = ScriptUI.newFont("dialog", "Bold", 18);
     var finishSizeText = resultPanel.add("statictext", undefined, "");
@@ -2685,23 +2696,28 @@ function buildAndShowDialog() {
     listContainer.orientation = "column";
     listContainer.alignChildren = ["fill", "top"];
     listContainer.alignment = ["fill", "fill"];
+    // 【v7】検出オブジェクト一覧が狭く見づらいとの指摘のため、初期サイズ・最小サイズを拡大。
+    // ツリーとの境界をドラッグで調整できるsplitterの簡易実装も検討したが、ScriptUIにはネイティブの
+    // splitterが無く、マウスドラッグの追跡をMacで安定動作させる自信が持てなかったため見送り、
+    // 代わりに一覧自体の確保サイズを大きくする妥協案を採用(コーディネータ承認済みの代替案)。
     var detailList = listContainer.add("listbox", undefined, [], { multiselect: true });
-    detailList.preferredSize = [340, 150]; // 初期は控えめ。リサイズで拡大可能
-    detailList.alignment = ["fill", "fill"];
-    var noteText = listContainer.add("statictext", undefined, "", { multiline: true });
-    noteText.preferredSize = [340, 56];
+    detailList.preferredSize = [380, 320]; // 従来[340,150]から拡大
+    detailList.minimumSize = [280, 200];   // ウィンドウ縮小時でもこれ以上潰れない下限
+    detailList.alignment = ["fill", "fill"]; // ウィンドウリサイズに追随して拡大
+
+    // 【v7】表示順を「検出オブジェクト一覧 → 選択してズームボタン → 説明欄」に変更。
+    // (旧: 一覧 → 説明欄 → ボタン。ボタンが一覧のすぐ下に来るよう並べ替え)
     var selectBtnGroup = listContainer.add("group");
     var selectBtn = selectBtnGroup.add("button", undefined, "選択してズーム");
     selectBtnGroup.add("statictext", undefined, "(行のダブルクリックでもジャンプします)");
+
+    var noteText = listContainer.add("statictext", undefined, "", { multiline: true });
+    noteText.preferredSize = [340, 56];
     var selStatusText = listContainer.add("statictext", undefined, "", { multiline: true });
     selStatusText.preferredSize = [340, 42];
 
-    var resultBtnGroup = resultPanel.add("group");
-    resultBtnGroup.alignment = "right";
-    var backBtn = resultBtnGroup.add("button", undefined, "設定に戻る");
-    var saveHtmlBtn = resultBtnGroup.add("button", undefined, "レポート保存(HTML)");
-    var saveCsvBtn = resultBtnGroup.add("button", undefined, "レポート保存(CSV)");
-    var closeBtn = resultBtnGroup.add("button", undefined, "閉じる"); // nameは付けない(設定側キャンセルとESC割当が競合するため)
+    // 【v7】結果画面ボタン列(resultBtnGroup等)は画面最上部に移動済み。
+    // 生成・配置はこのブロックの先頭(resultPanel直後)を参照。
 
     var currentResults = null;
     var currentSummary = null;
