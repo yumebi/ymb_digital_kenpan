@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.10.0";
+var KENPAN_VERSION = "1.11.0";
 
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
@@ -31,10 +31,10 @@ var KENPAN_VERSION = "1.10.0";
 //     (dlog()自体は残しておいてよい。呼び出し箇所を消さなくても影響が無い設計)。
 // -----------------------------------------------------------------------------
 
-// 【v1.10.0】スクロールバー非表示・進捗ファイル名空欄の両方について診断ログから
-// 確定原因が判明し修正済みのため、既定を false に戻した(ログ出力コード自体は
-// 温存してあり、別の不具合調査が必要になれば true に戻すだけで再利用できる)。
-var KENPAN_DEBUG_LOG = false;
+// 【v1.11.0】進捗ファイル名は v1.10.0 の修正で解決したが、スクロールバー非表示は
+// settingsViewportRow.layout.layout(true) の追加だけでは直らなかったため、再度ログを
+// 有効化し、複数の再描画手段を同時に試して「どれが効くか」を実機ログから見極める。
+var KENPAN_DEBUG_LOG = true;
 
 // デバッグログを1行追記する。KENPAN_DEBUG_LOG が false のときは何もしない。
 // 書き込み失敗(権限が無い等)しても本体機能に一切影響しないよう、全体をsafe()相当の
@@ -2546,6 +2546,42 @@ function buildAndShowDialog() {
     // スクロール範囲の再計算。判定は「固定したコンテンツ自然高 vs ビューポート可視高(リサイズ後)」。
     // ウィンドウ高がコンテンツ高より小さい場合: viewportH < settingsContentNaturalH となり
     // maxScroll > 0 → else分岐で scrollbar.visible = true / enabled = true になる。
+    // 【v1.11.0】settingsViewportRow.layout.layout(true) の追加だけではMacで直らなかったため、
+    // 複数の再描画手段を「多層防御」として同時に試し、それぞれの成否をログに残す
+    // (1つに賭けるのではなく、次のログで「どれが効いたか」を後から判別できるようにする)。
+    // 効果が不明な手段でも実害が無いものはすべて残す方針。
+    function forceScrollbarReflow(desiredVisible) {
+        // 手段1: scrollbarを含む親コンテナ(settingsViewportRow)の再レイアウト
+        var ok1 = safe(function () { settingsViewportRow.layout.layout(true); return true; }, false);
+        dlog("SCROLL", "再レイアウト手段1(settingsViewportRow.layout.layout): 成功=" + ok1);
+
+        // 手段2: ウィンドウ全体の再レイアウト。
+        // 【注意】以前このウィンドウ全体版はドラッグリサイズ中の毎フレーム呼び出しが原因で
+        // 余白が累積するバグの元だったが、ここでは可視性が「変化した時だけ」呼ばれるため
+        // 頻度は低く、安全と判断して試す(累積再発の有無はログと実機確認で見る)。
+        var ok2 = safe(function () { win.layout.layout(true); return true; }, false);
+        dlog("SCROLL", "再レイアウト手段2(win.layout.layout): 成功=" + ok2);
+
+        // 手段3: ScriptUIの notify() による明示的な再描画通知(存在すれば)。
+        // "onDraw" はScriptUIの標準イベント名として文書化されていないため効果は未知数だが、
+        // 存在しない/無効でも例外はsafe()で吸収されるだけで実害は無いため試す。
+        var ok3 = safe(function () {
+            if (settingsScrollbar.notify) { settingsScrollbar.notify("onDraw"); return true; }
+            return false;
+        }, false);
+        dlog("SCROLL", "再レイアウト手段3(settingsScrollbar.notify('onDraw')): 成功=" + ok3);
+
+        // 手段4: visible を一度falseにしてから即座に desiredVisible へ戻す
+        // (トグルによる強制再描画のワークアラウンド。既に同じ値をセットしようとしている
+        //  文脈でも、一度falseを経由させることで描画エンジンに変更を認識させられることがある)。
+        var ok4 = safe(function () {
+            settingsScrollbar.visible = false;
+            settingsScrollbar.visible = desiredVisible;
+            return true;
+        }, false);
+        dlog("SCROLL", "再レイアウト手段4(visible トグル: false->" + desiredVisible + "): 成功=" + ok4);
+    }
+
     function updateSettingsScrollRange() {
         try {
             if (settingsBaseline) {
@@ -2561,12 +2597,10 @@ function buildAndShowDialog() {
                     dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
                         " viewportH=" + viewportH + " maxScroll=" + maxScroll +
                         " -> scrollbar.enabled=false visible=false (全部見えていると判定)");
-                    // 【Mac対策】可視性が変化した時だけ親コンテナを明示的に再レイアウトする
-                    // (Cocoaはプロパティ変更だけでは再描画されないことがあるため)。
+                    // 【Mac対策】可視性が変化した時だけ多層の再描画手段を試す。
                     if (settingsScrollbarLastVisible !== false) {
-                        safe(function () { settingsViewportRow.layout.layout(true); return null; }, null);
+                        forceScrollbarReflow(false);
                         settingsScrollbarLastVisible = false;
-                        dlog("SCROLL", "updateSettingsScrollRange: visible=false へ変化したため settingsViewportRow.layout.layout(true) を実行");
                     }
                 } else {
                     settingsScrollbar.enabled = true;
@@ -2576,16 +2610,22 @@ function buildAndShowDialog() {
                     dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
                         " viewportH=" + viewportH + " maxScroll=" + maxScroll +
                         " -> scrollbar.enabled=true visible=true (スクロール必要と判定)");
-                    // 【Mac確定原因への対処】visible/enabledをtrueに切り替えた後、明示的に
-                    // 親コンテナ(settingsViewportRow)を再レイアウトしないとmacOSで画面に
-                    // 反映されないことがあった。変化した時だけ呼ぶことで、Windowsでの
-                    // 余分な再レイアウト・毎フレーム呼び出しによる負荷も避ける。
+                    // 【Mac確定原因への対処・多層防御】可視性が変化した時だけ複数の再描画手段を試す。
+                    // 変化検出により、Windowsでの余分な呼び出し・負荷は避ける。
                     if (settingsScrollbarLastVisible !== true) {
-                        safe(function () { settingsViewportRow.layout.layout(true); return null; }, null);
+                        forceScrollbarReflow(true);
                         settingsScrollbarLastVisible = true;
-                        dlog("SCROLL", "updateSettingsScrollRange: visible=true へ変化したため settingsViewportRow.layout.layout(true) を実行");
                     }
                 }
+                // 【検証ログ】実際に画面へ反映されたはずの状態を再取得して記録する。
+                // ここで .visible が期待値と食い違っていれば、プロパティの読み書き自体は
+                // 機能しているのに「描画」だけが反映されていないことの決定的な証拠になる。
+                dlog("SCROLL", "検証: 設定直後の再取得 settingsScrollbar.visible=" +
+                    safe(function () { return settingsScrollbar.visible; }, "(取得失敗)") +
+                    " .enabled=" + safe(function () { return settingsScrollbar.enabled; }, "(取得失敗)") +
+                    " .bounds=" + fmtArr(safe(function () { return settingsScrollbar.bounds; }, null)) +
+                    " .size=" + fmtArr(safe(function () { return settingsScrollbar.size; }, null)) +
+                    " .location=" + fmtArr(safe(function () { return settingsScrollbar.location; }, null)));
             } else {
                 dlog("SCROLL", "updateSettingsScrollRange: settingsBaselineが未確定のためスキップ");
             }
