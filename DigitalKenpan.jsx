@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.9.0";
+var KENPAN_VERSION = "1.10.0";
 
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
@@ -31,7 +31,10 @@ var KENPAN_VERSION = "1.9.0";
 //     (dlog()自体は残しておいてよい。呼び出し箇所を消さなくても影響が無い設計)。
 // -----------------------------------------------------------------------------
 
-var KENPAN_DEBUG_LOG = true; // 調査終了後は false にすること
+// 【v1.10.0】スクロールバー非表示・進捗ファイル名空欄の両方について診断ログから
+// 確定原因が判明し修正済みのため、既定を false に戻した(ログ出力コード自体は
+// 温存してあり、別の不具合調査が必要になれば true に戻すだけで再利用できる)。
+var KENPAN_DEBUG_LOG = false;
 
 // デバッグログを1行追記する。KENPAN_DEBUG_LOG が false のときは何もしない。
 // 書き込み失敗(権限が無い等)しても本体機能に一切影響しないよう、全体をsafe()相当の
@@ -1663,7 +1666,13 @@ CHECKS.image_colormode = function (doc, cfg, ctx) {
             var file = safe(function () { return item.file; }, null);
             if (!file || !file.exists) continue; // リンク切れは別チェックで報告
             (function () {
+                // 【Mac確定原因・診断ログで実証済み】file.displayNameがMacで空文字列を
+                // 返すことがあった(ScriptUI表示側の問題ではなくデータ取得の問題だった)。
+                // displayNameが空ならFile標準プロパティのnameへ、それも空ならfsName
+                // (フルパス)へ、と段階的にフォールバックする。
                 var rawName = safe(function () { return file.displayName; }, "");
+                if (!rawName) rawName = safe(function () { return file.name; }, "");
+                if (!rawName) rawName = safe(function () { return file.fsName; }, "");
                 var shortName = truncateForProgress(rawName, 40);
                 dlog("PROGRESS", "カラーモード判定中 短縮前=[" + rawName + "] 短縮後=[" + shortName + "]");
                 if (ctx.tick) ctx.tick("画像カラーモード判定中: " + shortName);
@@ -1704,7 +1713,11 @@ CHECKS.image_resolution = function (doc, cfg, ctx) {
             var file = safe(function () { return item.file; }, null);
             if (!file || !file.exists) continue;
             (function () {
+                // 【Mac確定原因】上のカラーモード判定中と同様、displayName -> name -> fsName の
+                // 順でフォールバックする(displayNameがMacで空文字列を返すことがあったため)。
                 var rawName2 = safe(function () { return file.displayName; }, "");
+                if (!rawName2) rawName2 = safe(function () { return file.name; }, "");
+                if (!rawName2) rawName2 = safe(function () { return file.fsName; }, "");
                 var shortName2 = truncateForProgress(rawName2, 40);
                 dlog("PROGRESS", "実効解像度算出中 短縮前=[" + rawName2 + "] 短縮後=[" + shortName2 + "]");
                 if (ctx.tick) ctx.tick("実効解像度算出中: " + shortName2);
@@ -2425,6 +2438,14 @@ function buildAndShowDialog() {
     settingsScrollbar.jumpdelta = 120;
     settingsScrollbar.enabled = false;
     settingsScrollbar.visible = false;
+    // 【Mac確定原因・診断ログで実証済み】updateSettingsScrollRange()の内部計算(maxScroll等)は
+    // 正しく行われ、settingsScrollbar.visible/enabled も正しい値に設定されているのに、
+    // macOS(Cocoa)では画面に反映されないことがあった。原因は、可視性プロパティを実行時に
+    // 切り替えた後に親コンテナへ明示的な再レイアウトを一切呼んでいなかったこと
+    // (Windowsはプロパティ変更だけで自動再描画されるが、Cocoaはそうならないことがある)。
+    // 直前の可視状態を記録しておき、「変化した時だけ」再レイアウトを呼ぶことで、
+    // Macでの不具合を解消しつつ、Windowsでの余分な再レイアウト呼び出しも避ける。
+    var settingsScrollbarLastVisible = null; // 初回は必ず一致しない値にしておき、初回も確実に反映させる
 
     // ---- スクロール/リサイズのジオメトリ管理 ----
     // 【方針】設定画面のリサイズは layout.resize() に任せず、初回レイアウト確定時に記録した
@@ -2540,6 +2561,13 @@ function buildAndShowDialog() {
                     dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
                         " viewportH=" + viewportH + " maxScroll=" + maxScroll +
                         " -> scrollbar.enabled=false visible=false (全部見えていると判定)");
+                    // 【Mac対策】可視性が変化した時だけ親コンテナを明示的に再レイアウトする
+                    // (Cocoaはプロパティ変更だけでは再描画されないことがあるため)。
+                    if (settingsScrollbarLastVisible !== false) {
+                        safe(function () { settingsViewportRow.layout.layout(true); return null; }, null);
+                        settingsScrollbarLastVisible = false;
+                        dlog("SCROLL", "updateSettingsScrollRange: visible=false へ変化したため settingsViewportRow.layout.layout(true) を実行");
+                    }
                 } else {
                     settingsScrollbar.enabled = true;
                     settingsScrollbar.visible = true;
@@ -2548,6 +2576,15 @@ function buildAndShowDialog() {
                     dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
                         " viewportH=" + viewportH + " maxScroll=" + maxScroll +
                         " -> scrollbar.enabled=true visible=true (スクロール必要と判定)");
+                    // 【Mac確定原因への対処】visible/enabledをtrueに切り替えた後、明示的に
+                    // 親コンテナ(settingsViewportRow)を再レイアウトしないとmacOSで画面に
+                    // 反映されないことがあった。変化した時だけ呼ぶことで、Windowsでの
+                    // 余分な再レイアウト・毎フレーム呼び出しによる負荷も避ける。
+                    if (settingsScrollbarLastVisible !== true) {
+                        safe(function () { settingsViewportRow.layout.layout(true); return null; }, null);
+                        settingsScrollbarLastVisible = true;
+                        dlog("SCROLL", "updateSettingsScrollRange: visible=true へ変化したため settingsViewportRow.layout.layout(true) を実行");
+                    }
                 }
             } else {
                 dlog("SCROLL", "updateSettingsScrollRange: settingsBaselineが未確定のためスキップ");
