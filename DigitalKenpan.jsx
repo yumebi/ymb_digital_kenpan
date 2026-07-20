@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.11.0";
+var KENPAN_VERSION = "1.12.0";
 
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
@@ -1671,7 +1671,10 @@ CHECKS.image_colormode = function (doc, cfg, ctx) {
                 // displayNameが空ならFile標準プロパティのnameへ、それも空ならfsName
                 // (フルパス)へ、と段階的にフォールバックする。
                 var rawName = safe(function () { return file.displayName; }, "");
-                if (!rawName) rawName = safe(function () { return file.name; }, "");
+                // 【v1.12.0】file.name はExtendScript仕様でURIエンコードされた名前を返す
+                // (日本語ファイル名だと %E3%81%82... のような%表記=「文字化けのよう」に
+                // 見えていた正体)。decodeURIで復号する(不正シーケンスで例外の場合はsafeが吸収)。
+                if (!rawName) rawName = safe(function () { return decodeURI(file.name); }, "");
                 if (!rawName) rawName = safe(function () { return file.fsName; }, "");
                 var shortName = truncateForProgress(rawName, 40);
                 dlog("PROGRESS", "カラーモード判定中 短縮前=[" + rawName + "] 短縮後=[" + shortName + "]");
@@ -1716,7 +1719,8 @@ CHECKS.image_resolution = function (doc, cfg, ctx) {
                 // 【Mac確定原因】上のカラーモード判定中と同様、displayName -> name -> fsName の
                 // 順でフォールバックする(displayNameがMacで空文字列を返すことがあったため)。
                 var rawName2 = safe(function () { return file.displayName; }, "");
-                if (!rawName2) rawName2 = safe(function () { return file.name; }, "");
+                // 【v1.12.0】file.nameのURIエンコード対策(上のカラーモード判定中と同じ)
+                if (!rawName2) rawName2 = safe(function () { return decodeURI(file.name); }, "");
                 if (!rawName2) rawName2 = safe(function () { return file.fsName; }, "");
                 var shortName2 = truncateForProgress(rawName2, 40);
                 dlog("PROGRESS", "実効解像度算出中 短縮前=[" + rawName2 + "] 短縮後=[" + shortName2 + "]");
@@ -2502,28 +2506,91 @@ function buildAndShowDialog() {
                 " settingsViewport.size=" + fmtArr(settingsViewport.size) +
                 " win.size=" + fmtArr(win.size) +
                 " screens[0]=" + fmtScreen(safe(function () { return $.screens[0]; }, null)));
+            // 【v1.12.0】直前の layout.layout(true) は内部コンテナを自然幅(ウィンドウより
+            // 広いことがある)に戻してしまうため、必ず直後にウィンドウ実サイズへの
+            // フィットを適用する。画面が小さいMacで「最初からはみ出している」ケースへの
+            // 補正はここが最重要(onShow即時・80ms遅延の両経路から到達する)。
+            applySettingsWindowFit(tag);
         } catch (eCap) {
             dlog("SCROLL", "captureSettingsBaseline[" + tag + "] 例外発生: " + eCap.toString());
         }
     }
 
-    // 設定画面のジオメトリを「baseline + ウィンドウサイズ差分」で機械的に再配置する。
-    // layout.resize() を使わないため余白の自己増殖(累積)が起きない。
-    function applySettingsResize() {
-        if (!settingsBaseline) return;
+    // 【v1.12.0・確定原因への対処】Macの実機ログで、スクロールバーは正常に存在・可視・
+    // 正常サイズ(16x500等)であるにもかかわらず bounds.x(820等)がウィンドウ実幅
+    // (win.size=[820,485])の右端以遠=画面外に配置されていることが確定した。
+    // 原因: 画面が小さいMacではウィンドウは縮小されて開くが、内部のviewportRow/viewport/
+    // contentは自然幅(969px等)のまま縮まず、その右端に置かれたスクロールバーが
+    // ウィンドウ外にはみ出していた(Windowsは画面が大きく自然幅で開けたため無症状)。
+    // 過去の「ボタンが見えない」問題も同根(コンテンツがウィンドウより大きい)の可能性が高い。
+    //
+    // 対処: 従来の「baseline+差分」ではなく、横・縦とも「現在のウィンドウ実サイズ」から
+    // 絶対値で計算し直す。前回状態もbaselineも参照しないため、累積バグも構造的に起きない。
+    // 各コンテナのウィンドウ内オフセット(マージン)は実測値(location)から取得する。
+    function applySettingsWindowFit(sourceTag) {
+        var tag = sourceTag ? sourceTag : "(不明)";
         try {
-            var dw = win.size[0] - settingsBaseline.winW;
-            var dh = win.size[1] - settingsBaseline.winH;
-            screens.size = [Math.max(120, settingsBaseline.screensW + dw), Math.max(60, settingsBaseline.screensH + dh)];
-            settingsPanel.size = [Math.max(120, settingsBaseline.panelW + dw), Math.max(60, settingsBaseline.panelH + dh)];
-            settingsViewportRow.size = [Math.max(100, settingsBaseline.rowW + dw), Math.max(40, settingsBaseline.rowH + dh)];
-            settingsViewport.size = [Math.max(80, settingsBaseline.vpW + dw), Math.max(40, settingsBaseline.vpH + dh)];
-            settingsScrollbar.size = [settingsScrollbar.size[0], Math.max(40, settingsBaseline.sbH + dh)];
-            settingsScrollbar.location = [settingsBaseline.sbX + dw, settingsBaseline.sbY];
-            // 【v6】ボタン列は settingsPanel の最初の子(画面最上部)に固定配置しており、
-            // サイズも位置も window リサイズの影響を受けない(常にネイティブlayoutのtop寄せ)ため、
-            // ここでの再配置は不要になった。
-        } catch (eRsz) {}
+            if (!win.size) { dlog("SCROLL", "applySettingsWindowFit[" + tag + "] win.size未確定のためスキップ"); return; }
+            var winW = win.size[0], winH = win.size[1];
+            // screens(win直下)の左上オフセット=ウィンドウのマージン(左右対称と仮定)
+            var scrX = screens.location ? screens.location[0] : 8;
+            var scrY = screens.location ? screens.location[1] : 8;
+            var availW = winW - scrX * 2;
+            var availH = winH - scrY - scrX; // 下マージンは左右と同等とみなす(僅かなズレは許容)
+            if (availW < 200) availW = 200;
+            if (availH < 150) availH = 150;
+            screens.size = [availW, availH];
+            settingsPanel.size = [availW, availH]; // stack内の子はscreensと同位置・同寸
+            // settingsViewportRow は settingsPanel 内(x=パネルmargins、y=ボタン行の下)
+            var rowX = settingsViewportRow.location ? settingsViewportRow.location[0] : 12;
+            var rowY = settingsViewportRow.location ? settingsViewportRow.location[1] : 40;
+            var rowW = availW - rowX * 2;
+            var rowH = availH - rowY - 12; // パネル下マージン(12)ぶんを引く
+            if (rowW < 120) rowW = 120;
+            if (rowH < 80) rowH = 80;
+            settingsViewportRow.size = [rowW, rowH];
+            // スクロールバーは行の右端「内側」に絶対配置(ここが今回の核心。
+            // 従来は自然幅ベースの位置のままウィンドウ外に出ていた)
+            var sbW = 16;
+            settingsScrollbar.size = [sbW, rowH];
+            settingsScrollbar.location = [rowW - sbW, 0];
+            // ビューポートは残り幅(スクロールバー幅+spacing 4 を除く)
+            var vpW = rowW - sbW - 4;
+            if (vpW < 100) vpW = 100;
+            settingsViewport.size = [vpW, rowH];
+            settingsViewport.location = [0, 0];
+            // コンテンツ幅もビューポート幅に合わせる(高さは自然高固定を維持)。
+            // 内部パネルの実幅がこれより広い場合は右側がクリップされるだけで許容
+            // (横スクロールは不要という方針)。
+            safe(function () {
+                var ch = (settingsContentNaturalH > 0) ? settingsContentNaturalH : settingsContent.size[1];
+                settingsContent.size = [vpW, ch];
+                return null;
+            }, null);
+            // 最上部ボタン列も右端がウィンドウ内に収まるよう再配置(right寄せ相当を自前で行う。
+            // ネイティブlayoutが自然幅969基準で置いたx座標のままだと、これもウィンドウ外に出る)
+            safe(function () {
+                var btnW = settingsBtnGroup.size ? settingsBtnGroup.size[0] : 0;
+                var btnX = availW - rowX - btnW;
+                if (btnX < 0) btnX = 0;
+                settingsBtnGroup.location = [btnX, settingsBtnGroup.location[1]];
+                return null;
+            }, null);
+            dlog("SCROLL", "applySettingsWindowFit[" + tag + "] 完了: win=" + fmtArr(win.size) +
+                " availW=" + availW + " availH=" + availH +
+                " rowW=" + rowW + " rowH=" + rowH +
+                " scrollbar.location=" + fmtArr(safe(function () { return settingsScrollbar.location; }, null)) +
+                " scrollbar.bounds=" + fmtArr(safe(function () { return settingsScrollbar.bounds; }, null)) +
+                " viewport.size=" + fmtArr(safe(function () { return settingsViewport.size; }, null)));
+        } catch (eFit) {
+            dlog("SCROLL", "applySettingsWindowFit[" + tag + "] 例外発生: " + eFit.toString());
+        }
+    }
+
+    // ウィンドウリサイズ確定時の再配置。v1.12.0からは「baseline+差分」ではなく
+    // ウィンドウ実サイズからの絶対計算(applySettingsWindowFit)に一本化した。
+    function applySettingsResize() {
+        applySettingsWindowFit("onResize");
     }
 
     // 【v6・最終防衛策】ボタン列は settingsPanel の一番最初の子として配置しているため、
@@ -2580,6 +2647,12 @@ function buildAndShowDialog() {
             return true;
         }, false);
         dlog("SCROLL", "再レイアウト手段4(visible トグル: false->" + desiredVisible + "): 成功=" + ok4);
+
+        // 【v1.12.0・重要】手段1・2のlayout.layout(true)は内部コンテナを自然幅
+        // (ウィンドウより広いことがある)へ戻してしまい、スクロールバーが再び
+        // ウィンドウ外へはみ出す(=確定原因の再発)。そのためリフロー後は必ず
+        // ウィンドウ実サイズへのフィットを再適用して整合させる。
+        applySettingsWindowFit("afterReflow");
     }
 
     function updateSettingsScrollRange() {
