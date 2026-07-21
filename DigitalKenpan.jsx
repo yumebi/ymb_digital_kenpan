@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.14.0";
+var KENPAN_VERSION = "1.15.0";
 
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
@@ -2408,7 +2408,10 @@ function buildAndShowDialog() {
     // 一番上にあるボタンだけは常に画面内に入ることを構造的に保証する。
     // スクロール領域(settingsViewportRow)の外に置く点は従来どおり。
     var settingsBtnGroup = settingsPanel.add("group");
-    settingsBtnGroup.alignment = "right";
+    // 【v1.15.0】右寄せ→左寄せに変更(ユーザー指示)。ヘッダーのドキュメント名表示と同じ
+    // 左端基準になる。"left"は自然幅ベースの計算に依存しないため、applySettingsWindowFit側の
+    // 右寄せ用の手動再配置(btnX計算)は不要になり削除した。
+    settingsBtnGroup.alignment = "left";
     var loadBtn = settingsBtnGroup.add("button", undefined, "設定を読込");
     var saveBtn = settingsBtnGroup.add("button", undefined, "設定を保存");
     var cancelBtn = settingsBtnGroup.add("button", undefined, "キャンセル", { name: "cancel" });
@@ -2448,6 +2451,12 @@ function buildAndShowDialog() {
     var settingsContent = settingsViewport.add("group");
     settingsContent.orientation = "column";
     settingsContent.alignChildren = ["fill", "top"];
+    // 【v1.15.0・横スクロール対応で重要】settingsViewport.alignChildren=["fill","top"]の
+    // 既定を継承すると、settingsContent自身が横方向は常に"fill"(ビューポート幅に強制的に
+    // 一致)されてしまい、captureSettingsBaseline内のwin.layout.layout(true)実行時に
+    // 自然幅(settingsContentNaturalW)がビューポート幅と同値に測定されてしまい、横スクロールが
+    // 常に不要と誤判定される。縦(top=非fill)と同様、横も明示的に非fill("left")にする。
+    settingsContent.alignment = ["left", "top"];
     // 【v1.14.0】カテゴリパネル間のspacingを6→10に拡大し、視覚的な区切りを強調
     settingsContent.spacing = 10;
     settingsContent.margins = 0;
@@ -2462,15 +2471,46 @@ function buildAndShowDialog() {
     settingsScrollbar.stepdelta = 24;
     settingsScrollbar.jumpdelta = 120;
     settingsScrollbar.enabled = false;
-    settingsScrollbar.visible = false;
+    // 【v1.15.0・常時表示化】ユーザー提案の根本解決: .visible を必要な時だけ true/false で
+    // トグルするのをやめ、常に true 固定にする(スクロール不要時は .enabled=false による
+    // グレーアウトのみ)。これにより「Macでvisible切替のたびに再レイアウトが必要」という
+    // 確定原因そのものが構造的に発生しなくなり、ウィンドウ右側やボタンのガタつきが解消される
+    // (visibleが変化しないので forceScrollbarReflow の再レイアウト実行契機も無くなる)。
+    settingsScrollbar.visible = true;
+
+    // 【v1.15.0】横スクロールバー行(縦スクロールバーの下に配置)。
+    // 仕組みは縦と同じ「常時表示、enabledのみ切替」方式で統一する。
+    var settingsHScrollRow = settingsPanel.add("group");
+    settingsHScrollRow.orientation = "row";
+    settingsHScrollRow.alignChildren = ["fill", "fill"];
+    settingsHScrollRow.alignment = ["fill", "top"];
+    settingsHScrollRow.spacing = 4;
+    settingsHScrollRow.margins = 0;
+    // 生成時のboundsを横長にして、確実に horizontal スクロールバーとして確定させる
+    // (縦スクロールバーが [0,0,16,200] で縦長boundsを使うのと対の措置)。
+    var settingsHScrollbar = settingsHScrollRow.add("scrollbar", [0, 0, 200, 16], 0, 0, 0);
+    settingsHScrollbar.preferredSize.height = 16;
+    settingsHScrollbar.alignment = ["fill", "fill"];
+    settingsHScrollbar.minvalue = 0;
+    settingsHScrollbar.stepdelta = 24;
+    settingsHScrollbar.jumpdelta = 120;
+    settingsHScrollbar.enabled = false;
+    settingsHScrollbar.visible = true; // 常時表示(縦と同方式)
+    // 縦スクロールバーの真下に来る位置を軽く埋めるコーナースペーサー(見た目の整合用)
+    var settingsHScrollCorner = settingsHScrollRow.add("group");
+    settingsHScrollCorner.preferredSize.width = 16;
+    settingsHScrollCorner.minimumSize.width = 16;
+    settingsHScrollCorner.maximumSize.width = 16;
+
     // 【Mac確定原因・診断ログで実証済み】updateSettingsScrollRange()の内部計算(maxScroll等)は
     // 正しく行われ、settingsScrollbar.visible/enabled も正しい値に設定されているのに、
     // macOS(Cocoa)では画面に反映されないことがあった。原因は、可視性プロパティを実行時に
     // 切り替えた後に親コンテナへ明示的な再レイアウトを一切呼んでいなかったこと
     // (Windowsはプロパティ変更だけで自動再描画されるが、Cocoaはそうならないことがある)。
-    // 直前の可視状態を記録しておき、「変化した時だけ」再レイアウトを呼ぶことで、
-    // Macでの不具合を解消しつつ、Windowsでの余分な再レイアウト呼び出しも避ける。
-    var settingsScrollbarLastVisible = null; // 初回は必ず一致しない値にしておき、初回も確実に反映させる
+    // 【v1.15.0】visibleは常時trueで変化しなくなったため、代わりに enabled の変化を追跡する
+    // (縦・横それぞれ独立に追跡)。初回は必ず一致しない値にしておき、初回も確実に反映させる。
+    var settingsScrollbarLastEnabled = null;
+    var settingsHScrollbarLastEnabled = null;
 
     // ---- スクロール/リサイズのジオメトリ管理 ----
     // 【方針】設定画面のリサイズは layout.resize() に任せず、初回レイアウト確定時に記録した
@@ -2478,6 +2518,7 @@ function buildAndShowDialog() {
     // 前回のリサイズ結果を一切参照しないため、リサイズ繰り返しによる余白の累積が構造的に起きない。
     var settingsBaseline = null;       // 初回レイアウト確定時のジオメトリ記録
     var settingsContentNaturalH = 0;   // 設定コンテンツの自然高(初回実測で固定)
+    var settingsContentNaturalW = 0;   // 【v1.15.0】設定コンテンツの自然幅(横スクロール用、初回実測で固定)
 
     // 【Mac対策】win.onShow直後はCocoa側のネイティブレイアウトが未確定で、
     // サイズ実測(.size)が不正確な場合がある(0や暫定値のまま)。
@@ -2497,18 +2538,25 @@ function buildAndShowDialog() {
             settingsContent.minimumSize = [0, 0];
             settingsContent.maximumSize = [100000, 100000];
             win.layout.layout(true);
-            // コンテンツの自然高を実測して固定し、以後のlayout処理で縮まないようにする
-            // (layout.resize()がcolumn内でコンテンツをビューポート高に縮めてしまうと、
-            //  実高=可視高になりスクロール不要と誤判定されるため)
+            // コンテンツの自然高・自然幅を実測して固定し、以後のlayout処理で縮まないようにする
+            // (layout.resize()がcolumn内でコンテンツをビューポート高/幅に縮めてしまうと、
+            //  実高/実幅=可視高/可視幅になりスクロール不要と誤判定されるため)
             settingsContentNaturalH = settingsContent.size[1];
+            settingsContentNaturalW = settingsContent.size[0];
             var usedFallback = false;
             if (!settingsContentNaturalH || settingsContentNaturalH < 10) {
                 // 実測が不正(未確定)な場合はpreferredSizeにフォールバック
                 settingsContentNaturalH = settingsContent.preferredSize ? settingsContent.preferredSize[1] : 0;
                 usedFallback = true;
             }
+            if (!settingsContentNaturalW || settingsContentNaturalW < 10) {
+                settingsContentNaturalW = settingsContent.preferredSize ? settingsContent.preferredSize[0] : 0;
+                usedFallback = true;
+            }
             settingsContent.minimumSize.height = settingsContentNaturalH;
             settingsContent.maximumSize.height = settingsContentNaturalH;
+            settingsContent.minimumSize.width = settingsContentNaturalW;
+            settingsContent.maximumSize.width = settingsContentNaturalW;
             settingsBaseline = {
                 winW: win.size[0], winH: win.size[1],
                 screensW: screens.size[0], screensH: screens.size[1],
@@ -2522,6 +2570,7 @@ function buildAndShowDialog() {
                 // top寄せに任せる。詳細はensureSettingsButtonsVisible()を参照)。
             };
             dlog("SCROLL", "captureSettingsBaseline[" + tag + "] 完了: settingsContentNaturalH=" + settingsContentNaturalH +
+                " settingsContentNaturalW=" + settingsContentNaturalW +
                 " (preferredSizeへのフォールバック使用=" + usedFallback + ")" +
                 " settingsContent.size(制約後)=" + fmtArr(safe(function () { return settingsContent.size; }, null)) +
                 " settingsViewport.size=" + fmtArr(settingsViewport.size) +
@@ -2575,7 +2624,11 @@ function buildAndShowDialog() {
             //  差し引いて逆算する)
             var rowAbsX = scrX + panelX + rowX;
             var rowW = winW - rowAbsX - SB_EDGE_GAP;
-            var rowH = availH - rowY - 12; // パネル下マージン(12)ぶんを引く
+            // 【v1.15.0】横スクロールバー行(settingsHScrollRow)の高さ+spacing(6px想定)を
+            // 縦方向の可用高から先に差し引いておく(縦スクロール可視領域rowHの計算に反映)。
+            var hScrollH = 16;
+            var hScrollGap = 6;
+            var rowH = availH - rowY - 12 - hScrollH - hScrollGap; // パネル下マージン(12)ぶんも引く
             if (rowW < 120) rowW = 120;
             if (rowH < 80) rowH = 80;
             settingsViewportRow.size = [rowW, rowH];
@@ -2589,29 +2642,36 @@ function buildAndShowDialog() {
             if (vpW < 100) vpW = 100;
             settingsViewport.size = [vpW, rowH];
             settingsViewport.location = [0, 0];
-            // コンテンツ幅もビューポート幅に合わせる(高さは自然高固定を維持)。
-            // 内部パネルの実幅がこれより広い場合は右側がクリップされるだけで許容
-            // (横スクロールは不要という方針)。
+
+            // 【v1.15.0】横スクロールバー行をviewportRowの直下、同じ左端・同じ幅で配置
+            safe(function () {
+                settingsHScrollRow.location = [rowX, rowY + rowH + hScrollGap];
+                settingsHScrollRow.size = [rowW, hScrollH];
+                // 縦スクロールバーの真下にコーナースペーサーが来るよう、横スクロールバー自体は
+                // 幅 vpW(縦スクロールバー分を除いた幅)に収める
+                settingsHScrollbar.size = [vpW, hScrollH];
+                return null;
+            }, null);
+
+            // 【v1.15.0・横スクロール対応】コンテンツは自然幅(settingsContentNaturalW)のまま保持し、
+            // ビューポート幅より広い場合は右側がクリップされ、横スクロールバーで見えるようにする
+            // (従来のようにコンテンツ幅をビューポート幅へ強制的に縮めることはしない)。
             safe(function () {
                 var ch = (settingsContentNaturalH > 0) ? settingsContentNaturalH : settingsContent.size[1];
-                settingsContent.size = [vpW, ch];
+                var cw = (settingsContentNaturalW > 0) ? settingsContentNaturalW : settingsContent.size[0];
+                settingsContent.size = [cw, ch];
                 return null;
             }, null);
-            // 最上部ボタン列も右端がウィンドウ内に収まるよう再配置(right寄せ相当を自前で行う。
-            // ネイティブlayoutが自然幅969基準で置いたx座標のままだと、これもウィンドウ外に出る)
-            safe(function () {
-                var btnW = settingsBtnGroup.size ? settingsBtnGroup.size[0] : 0;
-                var btnX = availW - rowX - btnW;
-                if (btnX < 0) btnX = 0;
-                settingsBtnGroup.location = [btnX, settingsBtnGroup.location[1]];
-                return null;
-            }, null);
+            // 【v1.15.0】ボタン列は左寄せに変更したため、右端合わせの手動再配置は不要になった
+            // (alignment="left"は自然幅ベースの計算に依存せず、常にウィンドウ内に収まる)。
             dlog("SCROLL", "applySettingsWindowFit[" + tag + "] 完了: win=" + fmtArr(win.size) +
                 " availW=" + availW + " availH=" + availH +
                 " rowW=" + rowW + " rowH=" + rowH +
                 " scrollbar.location=" + fmtArr(safe(function () { return settingsScrollbar.location; }, null)) +
                 " scrollbar.bounds=" + fmtArr(safe(function () { return settingsScrollbar.bounds; }, null)) +
-                " viewport.size=" + fmtArr(safe(function () { return settingsViewport.size; }, null)));
+                " hScrollbar.bounds=" + fmtArr(safe(function () { return settingsHScrollbar.bounds; }, null)) +
+                " viewport.size=" + fmtArr(safe(function () { return settingsViewport.size; }, null)) +
+                " settingsBtnGroup.location=" + fmtArr(safe(function () { return settingsBtnGroup.location; }, null)));
         } catch (eFit) {
             dlog("SCROLL", "applySettingsWindowFit[" + tag + "] 例外発生: " + eFit.toString());
         }
@@ -2647,17 +2707,21 @@ function buildAndShowDialog() {
     // 複数の再描画手段を「多層防御」として同時に試し、それぞれの成否をログに残す
     // (1つに賭けるのではなく、次のログで「どれが効いたか」を後から判別できるようにする)。
     // 効果が不明な手段でも実害が無いものはすべて残す方針。
-    function forceScrollbarReflow(desiredVisible) {
+    // 【v1.15.0】方針転換: .visible は常時true固定にしたため、旧・手段4(visibleトグル)は
+    // 廃止し、代わりに enabled のトグルに差し替えた(関数自体はログ確認のため温存)。
+    // reason: どの状況で呼ばれたかログで区別するための文字列。
+    function forceScrollbarReflow(reason) {
+        var tagR = reason ? reason : "(不明)";
         // 手段1: scrollbarを含む親コンテナ(settingsViewportRow)の再レイアウト
         var ok1 = safe(function () { settingsViewportRow.layout.layout(true); return true; }, false);
-        dlog("SCROLL", "再レイアウト手段1(settingsViewportRow.layout.layout): 成功=" + ok1);
+        dlog("SCROLL", "再レイアウト手段1(settingsViewportRow.layout.layout)[" + tagR + "]: 成功=" + ok1);
 
         // 手段2: ウィンドウ全体の再レイアウト。
         // 【注意】以前このウィンドウ全体版はドラッグリサイズ中の毎フレーム呼び出しが原因で
-        // 余白が累積するバグの元だったが、ここでは可視性が「変化した時だけ」呼ばれるため
+        // 余白が累積するバグの元だったが、ここではenabled状態が「変化した時だけ」呼ばれるため
         // 頻度は低く、安全と判断して試す(累積再発の有無はログと実機確認で見る)。
         var ok2 = safe(function () { win.layout.layout(true); return true; }, false);
-        dlog("SCROLL", "再レイアウト手段2(win.layout.layout): 成功=" + ok2);
+        dlog("SCROLL", "再レイアウト手段2(win.layout.layout)[" + tagR + "]: 成功=" + ok2);
 
         // 手段3: ScriptUIの notify() による明示的な再描画通知(存在すれば)。
         // "onDraw" はScriptUIの標準イベント名として文書化されていないため効果は未知数だが、
@@ -2666,69 +2730,74 @@ function buildAndShowDialog() {
             if (settingsScrollbar.notify) { settingsScrollbar.notify("onDraw"); return true; }
             return false;
         }, false);
-        dlog("SCROLL", "再レイアウト手段3(settingsScrollbar.notify('onDraw')): 成功=" + ok3);
+        dlog("SCROLL", "再レイアウト手段3(settingsScrollbar.notify('onDraw'))[" + tagR + "]: 成功=" + ok3);
 
-        // 手段4: visible を一度falseにしてから即座に desiredVisible へ戻す
-        // (トグルによる強制再描画のワークアラウンド。既に同じ値をセットしようとしている
-        //  文脈でも、一度falseを経由させることで描画エンジンに変更を認識させられることがある)。
+        // 【v1.15.0】旧手段4は visible を false→trueへトグルしていたが、常時表示化により
+        // visible自体は動かさない方針にしたため廃止。代わりに enabled を一瞬トグルして
+        // 同種の「変更を描画エンジンに気づかせる」効果を狙う(実害が無いため残す。
+        // 効果不明でもログで判別できるようにする)。
         var ok4 = safe(function () {
-            settingsScrollbar.visible = false;
-            settingsScrollbar.visible = desiredVisible;
+            var curV = settingsScrollbar.enabled, curH = settingsHScrollbar.enabled;
+            settingsScrollbar.enabled = !curV; settingsScrollbar.enabled = curV;
+            settingsHScrollbar.enabled = !curH; settingsHScrollbar.enabled = curH;
             return true;
         }, false);
-        dlog("SCROLL", "再レイアウト手段4(visible トグル: false->" + desiredVisible + "): 成功=" + ok4);
+        dlog("SCROLL", "再レイアウト手段4(enabledトグルによる再描画ナッジ)[" + tagR + "]: 成功=" + ok4);
 
         // 【v1.12.0・重要】手段1・2のlayout.layout(true)は内部コンテナを自然幅
         // (ウィンドウより広いことがある)へ戻してしまい、スクロールバーが再び
         // ウィンドウ外へはみ出す(=確定原因の再発)。そのためリフロー後は必ず
         // ウィンドウ実サイズへのフィットを再適用して整合させる。
-        applySettingsWindowFit("afterReflow");
+        applySettingsWindowFit("afterReflow-" + tagR);
     }
 
     function updateSettingsScrollRange() {
         try {
             if (settingsBaseline) {
                 var viewportH = settingsViewport.size ? settingsViewport.size[1] : 0;
-                var maxScroll = settingsContentNaturalH - viewportH;
-                if (maxScroll < 0) maxScroll = 0;
-                settingsScrollbar.maxvalue = maxScroll;
-                if (maxScroll <= 0) {
-                    settingsScrollbar.value = 0;
-                    settingsContent.location = [0, 0];
-                    settingsScrollbar.enabled = false;
-                    settingsScrollbar.visible = false;
-                    dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
-                        " viewportH=" + viewportH + " maxScroll=" + maxScroll +
-                        " -> scrollbar.enabled=false visible=false (全部見えていると判定)");
-                    // 【Mac対策】可視性が変化した時だけ多層の再描画手段を試す。
-                    if (settingsScrollbarLastVisible !== false) {
-                        forceScrollbarReflow(false);
-                        settingsScrollbarLastVisible = false;
-                    }
-                } else {
-                    settingsScrollbar.enabled = true;
-                    settingsScrollbar.visible = true;
-                    if (settingsScrollbar.value > maxScroll) settingsScrollbar.value = maxScroll;
-                    settingsContent.location = [0, -settingsScrollbar.value];
-                    dlog("SCROLL", "updateSettingsScrollRange: settingsContentNaturalH=" + settingsContentNaturalH +
-                        " viewportH=" + viewportH + " maxScroll=" + maxScroll +
-                        " -> scrollbar.enabled=true visible=true (スクロール必要と判定)");
-                    // 【Mac確定原因への対処・多層防御】可視性が変化した時だけ複数の再描画手段を試す。
-                    // 変化検出により、Windowsでの余分な呼び出し・負荷は避ける。
-                    if (settingsScrollbarLastVisible !== true) {
-                        forceScrollbarReflow(true);
-                        settingsScrollbarLastVisible = true;
-                    }
+                var viewportW = settingsViewport.size ? settingsViewport.size[0] : 0;
+                var maxScrollV = settingsContentNaturalH - viewportH;
+                var maxScrollH = settingsContentNaturalW - viewportW;
+                if (maxScrollV < 0) maxScrollV = 0;
+                if (maxScrollH < 0) maxScrollH = 0;
+                settingsScrollbar.maxvalue = maxScrollV;
+                settingsHScrollbar.maxvalue = maxScrollH;
+
+                // 【v1.15.0・常時表示化】.visible は常時true固定(ここでは一切変更しない)。
+                // スクロール不要時は .enabled=false によるグレーアウトのみで表現する。
+                var vEnabled = maxScrollV > 0;
+                var hEnabled = maxScrollH > 0;
+                settingsScrollbar.enabled = vEnabled;
+                settingsHScrollbar.enabled = hEnabled;
+                if (settingsScrollbar.value > maxScrollV) settingsScrollbar.value = maxScrollV;
+                if (settingsHScrollbar.value > maxScrollH) settingsHScrollbar.value = maxScrollH;
+                if (!vEnabled) settingsScrollbar.value = 0;
+                if (!hEnabled) settingsHScrollbar.value = 0;
+                settingsContent.location = [-settingsHScrollbar.value, -settingsScrollbar.value];
+
+                dlog("SCROLL", "updateSettingsScrollRange: naturalH=" + settingsContentNaturalH +
+                    " viewportH=" + viewportH + " maxScrollV=" + maxScrollV +
+                    " / naturalW=" + settingsContentNaturalW + " viewportW=" + viewportW + " maxScrollH=" + maxScrollH +
+                    " -> v.enabled=" + vEnabled + " h.enabled=" + hEnabled + " (visibleは常時true固定のため変化なし)");
+
+                // 【Mac対策】enabled状態が変化した時だけ多層の再描画手段を試す(縦・横を独立追跡)。
+                if (settingsScrollbarLastEnabled !== vEnabled) {
+                    forceScrollbarReflow("v-enabled->" + vEnabled);
+                    settingsScrollbarLastEnabled = vEnabled;
                 }
+                if (settingsHScrollbarLastEnabled !== hEnabled) {
+                    forceScrollbarReflow("h-enabled->" + hEnabled);
+                    settingsHScrollbarLastEnabled = hEnabled;
+                }
+
                 // 【検証ログ】実際に画面へ反映されたはずの状態を再取得して記録する。
-                // ここで .visible が期待値と食い違っていれば、プロパティの読み書き自体は
-                // 機能しているのに「描画」だけが反映されていないことの決定的な証拠になる。
-                dlog("SCROLL", "検証: 設定直後の再取得 settingsScrollbar.visible=" +
+                dlog("SCROLL", "検証: 設定直後の再取得 v.visible=" +
                     safe(function () { return settingsScrollbar.visible; }, "(取得失敗)") +
-                    " .enabled=" + safe(function () { return settingsScrollbar.enabled; }, "(取得失敗)") +
-                    " .bounds=" + fmtArr(safe(function () { return settingsScrollbar.bounds; }, null)) +
-                    " .size=" + fmtArr(safe(function () { return settingsScrollbar.size; }, null)) +
-                    " .location=" + fmtArr(safe(function () { return settingsScrollbar.location; }, null)));
+                    " v.enabled=" + safe(function () { return settingsScrollbar.enabled; }, "(取得失敗)") +
+                    " v.bounds=" + fmtArr(safe(function () { return settingsScrollbar.bounds; }, null)) +
+                    " h.visible=" + safe(function () { return settingsHScrollbar.visible; }, "(取得失敗)") +
+                    " h.enabled=" + safe(function () { return settingsHScrollbar.enabled; }, "(取得失敗)") +
+                    " h.bounds=" + fmtArr(safe(function () { return settingsHScrollbar.bounds; }, null)));
             } else {
                 dlog("SCROLL", "updateSettingsScrollRange: settingsBaselineが未確定のためスキップ");
             }
@@ -2738,10 +2807,14 @@ function buildAndShowDialog() {
         // baseline計算の成否によらず、ボタン列の可視性は必ずこの後で保証する
         ensureSettingsButtonsVisible();
     }
-    settingsScrollbar.onChanging = function () {
-        settingsContent.location = [0, -this.value];
-    };
-    settingsScrollbar.onChange = settingsScrollbar.onChanging;
+    // 縦・横どちらのスクロールバーが動いても settingsContent の位置は両方の値を反映する
+    function applySettingsContentScrollLocation() {
+        settingsContent.location = [-settingsHScrollbar.value, -settingsScrollbar.value];
+    }
+    settingsScrollbar.onChanging = applySettingsContentScrollLocation;
+    settingsScrollbar.onChange = applySettingsContentScrollLocation;
+    settingsHScrollbar.onChanging = applySettingsContentScrollLocation;
+    settingsHScrollbar.onChange = applySettingsContentScrollLocation;
 
     // --- 仕上がりサイズ ---
     var sizeGroup = settingsContent.add("panel", undefined, "仕上がりサイズ");
@@ -2934,7 +3007,8 @@ function buildAndShowDialog() {
     // ズレに関わらずボタンが必ず画面内に入る」ようにした対策と同じ理由・同じ構造を
     // 結果画面にも適用する。resultPanelの一番最初の子として(native top寄せで)配置。
     var resultBtnGroup = resultPanel.add("group");
-    resultBtnGroup.alignment = "right";
+    // 【v1.15.0】右寄せ→左寄せに変更(ユーザー指示。設定画面と統一)。
+    resultBtnGroup.alignment = "left";
     var backBtn = resultBtnGroup.add("button", undefined, "設定に戻る");
     var saveHtmlBtn = resultBtnGroup.add("button", undefined, "レポート保存(HTML)");
     var saveCsvBtn = resultBtnGroup.add("button", undefined, "レポート保存(CSV)");
@@ -2981,10 +3055,66 @@ function buildAndShowDialog() {
     var SPLIT_MIN_TREE_W = 150;
     var SPLIT_MIN_LIST_W = 200;
 
-    var resultBody = resultPanel.add("group");
+    // 【v1.15.0・方式転換】従来はウィンドウサイズに合わせてresultBody(ツリー+スプリッター+
+    // 右ペイン)を都度伸縮させていたが、「ウィンドウに勝手に追従して伸縮する」ことそのものが
+    // 不評だったため、設定画面と同じ「固定サイズのコンテンツ+スクロールバーで表示範囲を移動」
+    // 方式に作り替える。resultBody自体は固定の自然サイズを持つブロックとして扱い、
+    // これを新設のresultViewport(クリップ枠)に入れ、右に縦・下に横のスクロールバーを設置する
+    // (常時表示・enabled切替のみの方式は設定画面と統一)。
+    var resultViewportRow = resultPanel.add("group");
+    resultViewportRow.orientation = "row";
+    resultViewportRow.alignChildren = ["fill", "fill"];
+    resultViewportRow.alignment = ["fill", "fill"];
+    resultViewportRow.spacing = 4;
+    resultViewportRow.margins = 0;
+
+    var resultViewport = resultViewportRow.add("group");
+    resultViewport.orientation = "column";
+    resultViewport.alignChildren = ["fill", "top"];
+    resultViewport.alignment = ["fill", "fill"];
+    resultViewport.spacing = 0;
+    resultViewport.margins = 0;
+    resultViewport.minimumSize = [200, 100];
+
+    var resultVScrollbar = resultViewportRow.add("scrollbar", [0, 0, 16, 200], 0, 0, 0);
+    resultVScrollbar.preferredSize.width = 16;
+    resultVScrollbar.alignment = ["right", "fill"];
+    resultVScrollbar.minvalue = 0;
+    resultVScrollbar.stepdelta = 24;
+    resultVScrollbar.jumpdelta = 120;
+    resultVScrollbar.enabled = false;
+    resultVScrollbar.visible = true; // 設定画面と同じ「常時表示・enabledのみ切替」方式
+
+    var resultHScrollRow = resultPanel.add("group");
+    resultHScrollRow.orientation = "row";
+    resultHScrollRow.alignChildren = ["fill", "fill"];
+    resultHScrollRow.alignment = ["fill", "top"];
+    resultHScrollRow.spacing = 4;
+    resultHScrollRow.margins = 0;
+    var resultHScrollbar = resultHScrollRow.add("scrollbar", [0, 0, 200, 16], 0, 0, 0);
+    resultHScrollbar.preferredSize.height = 16;
+    resultHScrollbar.alignment = ["fill", "fill"];
+    resultHScrollbar.minvalue = 0;
+    resultHScrollbar.stepdelta = 24;
+    resultHScrollbar.jumpdelta = 120;
+    resultHScrollbar.enabled = false;
+    resultHScrollbar.visible = true;
+    var resultHScrollCorner = resultHScrollRow.add("group");
+    resultHScrollCorner.preferredSize.width = 16;
+    resultHScrollCorner.minimumSize.width = 16;
+    resultHScrollCorner.maximumSize.width = 16;
+
+    var resultScrollbarLastEnabled = null;   // 縦スクロールバーのenabled変化追跡(設定画面と同じ手法)
+    var resultHScrollbarLastEnabled = null;  // 横スクロールバーのenabled変化追跡
+    var resultBodyNaturalW = 0;              // resultBodyの自然幅(初回実測・splitterドラッグ後に再測定)
+    var resultBodyNaturalH = 0;              // resultBodyの自然高
+
+    var resultBody = resultViewport.add("group");
     resultBody.orientation = "row";
     resultBody.alignChildren = ["fill", "fill"];
-    resultBody.alignment = ["fill", "fill"]; // ウィンドウリサイズ時に伸縮する主領域
+    // 【v1.15.0】ウィンドウに追従して伸縮させない(固定の自然サイズ)。非fillにして
+    // ビューポートより大きければはみ出してクリップされ、スクロールバーで見る方式にする。
+    resultBody.alignment = ["left", "top"];
     resultBody.spacing = 2;
 
     var treeContainer = resultBody.add("panel", undefined, "項目一覧");
@@ -3019,19 +3149,21 @@ function buildAndShowDialog() {
     var listContainer = resultBody.add("panel", undefined, "検出オブジェクト一覧");
     listContainer.orientation = "column";
     applyPanelBackdrop(listContainer); // 【v1.14.0】面での区切り
-    // 【v8修正】ウィンドウを縦に伸ばすと一覧/ボタン/説明欄の間隔が広がる問題への対策。
-    // alignChildrenは["fill","top"]のままだが、各子要素の alignment を明示指定に変える
-    // (継承任せにしない)。fillを持つのは detailList だけにし、他は top固定で
-    // 一覧のすぐ下に密着させる。伸ばした分は detailList だけが広がって吸収する。
+    // 【v8修正】各子要素の alignment を明示指定(継承任せにしない)。
+    // 【v1.15.0】方式転換: detailListも含め全要素を高さ固定にする(ウィンドウに合わせて
+    // 伸縮させない)。listContainer自体もresultBody内で非fillの自然サイズになる。
     listContainer.alignChildren = ["fill", "top"];
-    listContainer.alignment = ["fill", "fill"];
+    listContainer.alignment = ["fill", "top"];
     listContainer.spacing = 6; // 間隔を固定値にして曖昧な継承由来のズレを排除
     listContainer.minimumSize.width = SPLIT_MIN_LIST_W;
-    // 【v7→v8】検出オブジェクト一覧が狭く見づらいとの指摘のため、初期サイズ・最小サイズを拡大。
+    // 【v7→v8→v1.15.0】検出オブジェクト一覧: v8時点の固定サイズ方式に戻し、少し余裕を持たせる。
     var detailList = listContainer.add("listbox", undefined, [], { multiselect: true });
-    detailList.preferredSize = [380, 320]; // 従来[340,150]から拡大
-    detailList.minimumSize = [280, 200];   // ウィンドウ縮小時でもこれ以上潰れない下限
-    detailList.alignment = ["fill", "fill"]; // 縦に伸ばした分はここだけが広がる(伸びる対象)
+    detailList.preferredSize = [380, 340]; // v8の[380,320]から少し余裕を持たせた値
+    detailList.minimumSize = [280, 200];
+    // 【v1.15.0】固定高さに変更(伸縮させない)。他の要素(ボタン/説明欄/ステータス欄)と
+    // 同じ非fill(top)にする。ウィンドウに追従して伸びる仕組みそのものを廃止し、
+    // 溢れた分はresultViewportの外付けスクロールバーで見る方式に統一する。
+    detailList.alignment = ["fill", "top"];
 
     // 【v7】表示順を「検出オブジェクト一覧 → 選択してズームボタン → 説明欄」に変更。
     // (旧: 一覧 → 説明欄 → ボタン。ボタンが一覧のすぐ下に来るよう並べ替え)
@@ -3056,124 +3188,184 @@ function buildAndShowDialog() {
     selStatusText.preferredSize = [340, 42];
     selStatusText.alignment = ["fill", "top"];
 
-    // 【v1.13.0】結果画面にも v1.12.0(設定画面)と同じ「ウィンドウ実サイズからの絶対フィット」
-    // を適用する。小さい画面のMacではウィンドウが縮小されて開く一方、内部コンテンツは
-    // 自然サイズのまま縮まず、下部(「選択してズーム」ボタン等)がウィンドウ外に切れて
-    // 操作できなかった。ツリーと検出オブジェクト一覧はそれ自体が内部スクロールを持つ
-    // コントロールなので、外側の枠をウィンドウ内にフィットさせれば中身は内部スクロールで
-    // 見られる——設定画面のような外付けスクロールバーは不要(方式が違うのはそのため)。
-    // 前回状態もbaselineも参照しない絶対計算のため、余白累積も構造的に起きない。
+    // 【v1.15.0・方式転換】結果画面も設定画面と同じ「固定サイズのコンテンツ+スクロールバーで
+    // 表示範囲を移動」方式に作り替えた。resultBody自体は自然サイズのまま保持し(ウィンドウに
+    // 合わせて伸縮させない)、resultViewportがクリップ枠として機能する。
+    // 前回状態を参照しない絶対計算のため、余白累積も構造的に起きない。
+
+    // resultBodyの自然サイズを実測して固定する(設定画面のcaptureSettingsBaselineと同じ手法:
+    // 制約を一旦解除してから測り直すことで、以前の固定値による自己ポイズニングを防ぐ)。
+    // 初回表示時・スプリッタードラッグ後(ツリー幅が変わり自然幅も変わるため)に呼ぶ。
+    function captureResultBodyNatural(sourceTag) {
+        var tag = sourceTag ? sourceTag : "(不明)";
+        try {
+            resultBody.minimumSize = [0, 0];
+            resultBody.maximumSize = [100000, 100000];
+            win.layout.layout(true);
+            resultBodyNaturalW = resultBody.size[0];
+            resultBodyNaturalH = resultBody.size[1];
+            if (!resultBodyNaturalW || resultBodyNaturalW < 10) {
+                resultBodyNaturalW = resultBody.preferredSize ? resultBody.preferredSize[0] : 0;
+            }
+            if (!resultBodyNaturalH || resultBodyNaturalH < 10) {
+                resultBodyNaturalH = resultBody.preferredSize ? resultBody.preferredSize[1] : 0;
+            }
+            resultBody.minimumSize = [resultBodyNaturalW, resultBodyNaturalH];
+            resultBody.maximumSize = [resultBodyNaturalW, resultBodyNaturalH];
+            dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] naturalW=" + resultBodyNaturalW +
+                " naturalH=" + resultBodyNaturalH + " win.size=" + fmtArr(win.size));
+        } catch (eCapR) {
+            dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] 例外発生: " + eCapR.toString());
+        }
+    }
+
+    // ウィンドウ実サイズからビューポート・スクロールバーのジオメトリを絶対計算する
+    // (設定画面のapplySettingsWindowFitと同じ方針)。resultBody自体のサイズは変更しない
+    // (自然サイズに固定済み)。
     function applyResultWindowFit(sourceTag) {
         var tag = sourceTag ? sourceTag : "(不明)";
         try {
             if (!win.size) { dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] win.size未確定のためスキップ"); return; }
             if (!resultBody.visible) { dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] resultBody非表示(検版実行中等)のためスキップ"); return; }
             var winW = win.size[0], winH = win.size[1];
-            // ウィンドウ内オフセットは実測値から取得(設定画面フィットと同じ方針)
             var scrX = screens.location ? screens.location[0] : 8;
             var scrY = screens.location ? screens.location[1] : 8;
-            var availW = winW - scrX * 2;
+            var SB_EDGE_GAP = 2;
+            var availW = winW - scrX - SB_EDGE_GAP;
             var availH = winH - scrY - scrX;
             if (availW < 300) availW = 300;
             if (availH < 200) availH = 200;
             screens.size = [availW, availH];
             resultPanel.size = [availW, availH]; // stack内の子はscreensと同位置・同寸
 
-            // resultBody(ツリー+スプリッター+右ペインの行)の位置はネイティブレイアウトの
-            // 実測値(ボタン列・総合判定・仕上がりサイズ表示の下)を使う
-            var bodyX = resultBody.location ? resultBody.location[0] : 12;
-            var bodyY = resultBody.location ? resultBody.location[1] : 100;
-            var bodyW = availW - bodyX * 2;
-            var bodyH = availH - bodyY - 12; // パネル下マージン
-            if (bodyW < 250) bodyW = 250;
-            if (bodyH < 150) bodyH = 150;
-            resultBody.size = [bodyW, bodyH];
+            var panelX = resultPanel.location ? resultPanel.location[0] : 0;
+            var rowX = resultViewportRow.location ? resultViewportRow.location[0] : 12;
+            var rowY = resultViewportRow.location ? resultViewportRow.location[1] : 100;
+            var rowAbsX = scrX + panelX + rowX;
+            var rowW = winW - rowAbsX - SB_EDGE_GAP;
+            var hScrollH = 16, hScrollGap = 6;
+            var rowH = availH - rowY - 12 - hScrollH - hScrollGap;
+            if (rowW < 250) rowW = 250;
+            if (rowH < 150) rowH = 150;
+            resultViewportRow.size = [rowW, rowH];
 
-            // ---- 幅の分配 ----
-            // ツリー幅はスプリッターでユーザーが調整した現在値を尊重。
-            // ただし合計が bodyW を超える場合は右ペインの最低幅(SPLIT_MIN_LIST_W)を優先して
-            // ツリーを縮める(極小ウィンドウでは右ペイン優先、の方針)。
-            var sbW = 8;        // splitterBar幅
-            var gap = 2;        // resultBody.spacing
-            var treeW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
-            var maxTreeW2 = bodyW - SPLIT_MIN_LIST_W - sbW - gap * 2;
-            if (treeW > maxTreeW2) treeW = maxTreeW2;         // 右ペイン最低幅を優先して縮める
-            if (treeW < SPLIT_MIN_TREE_W && maxTreeW2 >= SPLIT_MIN_TREE_W) treeW = SPLIT_MIN_TREE_W;
-            if (treeW < 50) treeW = 50;                        // 極小ウィンドウ時の最終ガード
-            var listW = bodyW - treeW - sbW - gap * 2;
-            if (listW < 100) listW = 100;
+            var sbW = 16;
+            resultVScrollbar.size = [sbW, rowH];
+            resultVScrollbar.location = [rowW - sbW, 0];
+            var vpW = rowW - sbW - 4;
+            if (vpW < 100) vpW = 100;
+            resultViewport.size = [vpW, rowH];
+            resultViewport.location = [0, 0];
 
-            // ---- 各要素の絶対配置(resultBody内、位置もspacing込みで明示) ----
-            treeContainer.location = [0, 0];
-            treeContainer.size = [treeW, bodyH];
-            // 次に layout.layout(true) が走った時もこの幅が基準になるよう preferredSize も同期
-            safe(function () { treeContainer.preferredSize.width = treeW; return null; }, null);
-            splitterBar.location = [treeW + gap, 0];
-            splitterBar.size = [sbW, bodyH];
-            listContainer.location = [treeW + gap + sbW + gap, 0];
-            listContainer.size = [listW, bodyH];
-
-            // ツリー本体もパネル内マージン実測値でフィット(内部スクロールは treeview 自身が持つ)
             safe(function () {
-                var tx = tree.location ? tree.location[0] : 4;
-                var ty = tree.location ? tree.location[1] : 16;
-                tree.size = [treeW - tx * 2, bodyH - ty - tx];
+                resultHScrollRow.location = [rowX, rowY + rowH + hScrollGap];
+                resultHScrollRow.size = [rowW, hScrollH];
+                resultHScrollbar.size = [vpW, hScrollH];
                 return null;
             }, null);
 
-            // ---- 右ペイン内の縦分配 ----
-            // detailList(伸縮)→選択してズームボタン(固定)→説明欄(固定)→ステータス欄(固定)。
-            // 下部要素の実測高を bodyH から引いた残りを detailList に与えることで、
-            // ボタン・説明欄・ステータス欄が常にウィンドウ内に収まる。
+            // resultBodyは自然サイズのまま保持(ビューポートより大きい分ははみ出してクリップされる)
             safe(function () {
-                var innerSpacing = 6; // listContainer.spacing
-                var lx = detailList.location ? detailList.location[0] : 4;
-                var ly = detailList.location ? detailList.location[1] : 16;
-                var btnH = selectBtnGroup.size ? selectBtnGroup.size[1] : 30;
-                var noteH = noteText.size ? noteText.size[1] : 56;
-                var statusH = selStatusText.size ? selStatusText.size[1] : 42;
-                var innerW = listW - lx * 2;
-                if (innerW < 80) innerW = 80;
-                var fixedH = (btnH + innerSpacing) + (noteH + innerSpacing) + (statusH + innerSpacing);
-                var dlH = bodyH - ly - fixedH - lx; // 下マージンは左マージンと同等とみなす
-                if (dlH < 80) dlH = 80;
-                detailList.size = [innerW, dlH];
-                detailList.location = [lx, ly];
-                var y2 = ly + dlH + innerSpacing;
-                selectBtnGroup.location = [lx, y2];
-                y2 += btnH + innerSpacing;
-                noteText.location = [lx, y2];
-                noteText.size = [innerW, noteH];
-                y2 += noteH + innerSpacing;
-                selStatusText.location = [lx, y2];
-                selStatusText.size = [innerW, statusH];
+                var bw = (resultBodyNaturalW > 0) ? resultBodyNaturalW : resultBody.size[0];
+                var bh = (resultBodyNaturalH > 0) ? resultBodyNaturalH : resultBody.size[1];
+                resultBody.size = [bw, bh];
                 return null;
             }, null);
 
             dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] 完了: win=" + fmtArr(win.size) +
                 " availW=" + availW + " availH=" + availH +
-                " bodyW=" + bodyW + " bodyH=" + bodyH +
-                " treeW=" + treeW + " listW=" + listW +
-                " detailList.size=" + fmtArr(safe(function () { return detailList.size; }, null)) +
-                " selectBtnGroup.location=" + fmtArr(safe(function () { return selectBtnGroup.location; }, null)) +
-                " selStatusText.bounds=" + fmtArr(safe(function () { return selStatusText.bounds; }, null)));
+                " rowW=" + rowW + " rowH=" + rowH + " vpW=" + vpW +
+                " resultBodyNaturalW=" + resultBodyNaturalW + " resultBodyNaturalH=" + resultBodyNaturalH +
+                " vScrollbar.bounds=" + fmtArr(safe(function () { return resultVScrollbar.bounds; }, null)) +
+                " hScrollbar.bounds=" + fmtArr(safe(function () { return resultHScrollbar.bounds; }, null)));
         } catch (eRFit) {
             dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] 例外発生: " + eRFit.toString());
         }
     }
 
+    // 【v1.15.0】設定画面と同じ「常時表示・enabledのみ切替」方式のスクロール範囲再計算。
+    function updateResultScrollRange() {
+        try {
+            var viewportH = resultViewport.size ? resultViewport.size[1] : 0;
+            var viewportW = resultViewport.size ? resultViewport.size[0] : 0;
+            var maxScrollV = resultBodyNaturalH - viewportH;
+            var maxScrollH = resultBodyNaturalW - viewportW;
+            if (maxScrollV < 0) maxScrollV = 0;
+            if (maxScrollH < 0) maxScrollH = 0;
+            resultVScrollbar.maxvalue = maxScrollV;
+            resultHScrollbar.maxvalue = maxScrollH;
+
+            var vEnabled = maxScrollV > 0;
+            var hEnabled = maxScrollH > 0;
+            resultVScrollbar.enabled = vEnabled;
+            resultHScrollbar.enabled = hEnabled;
+            if (resultVScrollbar.value > maxScrollV) resultVScrollbar.value = maxScrollV;
+            if (resultHScrollbar.value > maxScrollH) resultHScrollbar.value = maxScrollH;
+            if (!vEnabled) resultVScrollbar.value = 0;
+            if (!hEnabled) resultHScrollbar.value = 0;
+            resultBody.location = [-resultHScrollbar.value, -resultVScrollbar.value];
+
+            dlog("RESULT-FIT", "updateResultScrollRange: naturalH=" + resultBodyNaturalH + " viewportH=" + viewportH +
+                " maxScrollV=" + maxScrollV + " / naturalW=" + resultBodyNaturalW + " viewportW=" + viewportW +
+                " maxScrollH=" + maxScrollH + " -> v.enabled=" + vEnabled + " h.enabled=" + hEnabled);
+
+            if (resultScrollbarLastEnabled !== vEnabled) {
+                forceResultScrollbarReflow("v-enabled->" + vEnabled);
+                resultScrollbarLastEnabled = vEnabled;
+            }
+            if (resultHScrollbarLastEnabled !== hEnabled) {
+                forceResultScrollbarReflow("h-enabled->" + hEnabled);
+                resultHScrollbarLastEnabled = hEnabled;
+            }
+        } catch (eURS) {
+            dlog("RESULT-FIT", "updateResultScrollRange: 例外発生 " + eURS.toString());
+        }
+    }
+
+    // 設定画面のforceScrollbarReflowと同じ多層防御(ログ確認用に温存)。
+    function forceResultScrollbarReflow(reason) {
+        var tagR = reason ? reason : "(不明)";
+        var ok1 = safe(function () { resultViewportRow.layout.layout(true); return true; }, false);
+        dlog("RESULT-FIT", "再レイアウト手段1(resultViewportRow.layout.layout)[" + tagR + "]: 成功=" + ok1);
+        var ok2 = safe(function () { win.layout.layout(true); return true; }, false);
+        dlog("RESULT-FIT", "再レイアウト手段2(win.layout.layout)[" + tagR + "]: 成功=" + ok2);
+        var ok3 = safe(function () {
+            if (resultVScrollbar.notify) { resultVScrollbar.notify("onDraw"); return true; }
+            return false;
+        }, false);
+        dlog("RESULT-FIT", "再レイアウト手段3(resultVScrollbar.notify('onDraw'))[" + tagR + "]: 成功=" + ok3);
+        var ok4 = safe(function () {
+            var curV = resultVScrollbar.enabled, curH = resultHScrollbar.enabled;
+            resultVScrollbar.enabled = !curV; resultVScrollbar.enabled = curV;
+            resultHScrollbar.enabled = !curH; resultHScrollbar.enabled = curH;
+            return true;
+        }, false);
+        dlog("RESULT-FIT", "再レイアウト手段4(enabledトグルによる再描画ナッジ)[" + tagR + "]: 成功=" + ok4);
+        applyResultWindowFit("afterReflow-" + tagR);
+    }
+
+    // 縦・横どちらのスクロールバーが動いても resultBody の位置は両方の値を反映する
+    function applyResultBodyScrollLocation() {
+        resultBody.location = [-resultHScrollbar.value, -resultVScrollbar.value];
+    }
+    resultVScrollbar.onChanging = applyResultBodyScrollLocation;
+    resultVScrollbar.onChange = applyResultBodyScrollLocation;
+    resultHScrollbar.onChanging = applyResultBodyScrollLocation;
+    resultHScrollbar.onChange = applyResultBodyScrollLocation;
+
     // ---- splitter: 幅の適用/クランプ処理(ドラッグ処理から使用) ----
+    // 【v1.15.0】固定サイズ方式への転換に伴い、ウィンドウ幅を基準にした上限クランプ
+    // (旧SPLIT_MIN_LIST_W由来のmaxTreeW計算)は廃止。オーバーフローはスクロールバーが
+    // 担うため、下限(SPLIT_MIN_TREE_W)のみでクランプし、ユーザーが自由に幅を選べるようにする。
     function applySplitTreeWidth(newW) {
         try {
-            var totalW = resultBody.size ? resultBody.size[0] : (treeContainer.size[0] + listContainer.size[0] + 16);
-            var maxTreeW = totalW - SPLIT_MIN_LIST_W - splitterBar.size[0] - 8;
             if (newW < SPLIT_MIN_TREE_W) newW = SPLIT_MIN_TREE_W;
-            if (maxTreeW > SPLIT_MIN_TREE_W && newW > maxTreeW) newW = maxTreeW;
             treeContainer.preferredSize.width = newW;
             win.layout.layout(true);
-            // 【v1.13.0】layout.layout(true)は内部コンテナを自然サイズへ戻し得るため、
-            // 直後に必ずウィンドウ実サイズへのフィットを再適用する(v1.12.0と同じ原則)
+            // ツリー幅が変わった=resultBodyの自然幅も変わったため、再測定してから再フィットする
+            captureResultBodyNatural("afterSplit");
             applyResultWindowFit("afterSplit");
+            updateResultScrollRange();
         } catch (eApply) {}
     }
 
@@ -3303,9 +3495,11 @@ function buildAndShowDialog() {
         populateTree(results);
         win.text = TITLE_RESULT_PREFIX + doc.name;
         win.layout.layout(true);
-        // 【v1.13.0】layout.layout(true)直後に必ずウィンドウ実サイズへのフィットを適用
-        // (小さい画面のMacで結果画面の下部が切れて操作不能になる問題への対処)
+        // 【v1.15.0】表示直後にresultBodyの自然サイズを実測・固定してからフィット+スクロール範囲を計算する
+        // (小さい画面のMacで結果画面の下部が切れて操作不能になる問題への対処。設定画面と同じ手順)
+        captureResultBodyNatural("showResults");
         applyResultWindowFit("showResults");
+        updateResultScrollRange();
     }
 
     backBtn.onClick = function () {
@@ -3431,13 +3625,15 @@ function buildAndShowDialog() {
         dlog("SCROLL", "win.onResize発火: 新しいwin.size=" + fmtArr(win.size) + " resultPanel.visible=" + resultPanel.visible);
         if (resultPanel.visible) {
             this.layout.resize();
-            // 【v1.13.0】layout.resize()は内部コンテンツを自然サイズへ戻し得るため、
-            // 直後に必ずウィンドウ実サイズへのフィットを再適用する(v1.12.0と同じ原則)
+            // 【v1.13.0→v1.15.0】layout.resize()は内部コンテンツを自然サイズへ戻し得るため、
+            // 直後に必ずウィンドウ実サイズへのフィット+スクロール範囲の再計算を行う
+            // (resultBody自体のサイズはcaptureResultBodyNaturalで固定済みなので再測定はしない)。
             applyResultWindowFit("onResize");
+            updateResultScrollRange();
         } else {
             applySettingsResize();
+            updateSettingsScrollRange();
         }
-        updateSettingsScrollRange();
     };
     // ダイアログ表示直後: 初回レイアウト確定値を記録し、初期スクロール範囲を計算する。
     // 【Mac対策】Cocoa側では onShow 発火時点でもネイティブレイアウトが未確定な場合があるため、
