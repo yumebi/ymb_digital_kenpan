@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.12.0";
+var KENPAN_VERSION = "1.13.0";
 
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
@@ -3020,6 +3020,112 @@ function buildAndShowDialog() {
     selStatusText.preferredSize = [340, 42];
     selStatusText.alignment = ["fill", "top"];
 
+    // 【v1.13.0】結果画面にも v1.12.0(設定画面)と同じ「ウィンドウ実サイズからの絶対フィット」
+    // を適用する。小さい画面のMacではウィンドウが縮小されて開く一方、内部コンテンツは
+    // 自然サイズのまま縮まず、下部(「選択してズーム」ボタン等)がウィンドウ外に切れて
+    // 操作できなかった。ツリーと検出オブジェクト一覧はそれ自体が内部スクロールを持つ
+    // コントロールなので、外側の枠をウィンドウ内にフィットさせれば中身は内部スクロールで
+    // 見られる——設定画面のような外付けスクロールバーは不要(方式が違うのはそのため)。
+    // 前回状態もbaselineも参照しない絶対計算のため、余白累積も構造的に起きない。
+    function applyResultWindowFit(sourceTag) {
+        var tag = sourceTag ? sourceTag : "(不明)";
+        try {
+            if (!win.size) { dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] win.size未確定のためスキップ"); return; }
+            if (!resultBody.visible) { dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] resultBody非表示(検版実行中等)のためスキップ"); return; }
+            var winW = win.size[0], winH = win.size[1];
+            // ウィンドウ内オフセットは実測値から取得(設定画面フィットと同じ方針)
+            var scrX = screens.location ? screens.location[0] : 8;
+            var scrY = screens.location ? screens.location[1] : 8;
+            var availW = winW - scrX * 2;
+            var availH = winH - scrY - scrX;
+            if (availW < 300) availW = 300;
+            if (availH < 200) availH = 200;
+            screens.size = [availW, availH];
+            resultPanel.size = [availW, availH]; // stack内の子はscreensと同位置・同寸
+
+            // resultBody(ツリー+スプリッター+右ペインの行)の位置はネイティブレイアウトの
+            // 実測値(ボタン列・総合判定・仕上がりサイズ表示の下)を使う
+            var bodyX = resultBody.location ? resultBody.location[0] : 12;
+            var bodyY = resultBody.location ? resultBody.location[1] : 100;
+            var bodyW = availW - bodyX * 2;
+            var bodyH = availH - bodyY - 12; // パネル下マージン
+            if (bodyW < 250) bodyW = 250;
+            if (bodyH < 150) bodyH = 150;
+            resultBody.size = [bodyW, bodyH];
+
+            // ---- 幅の分配 ----
+            // ツリー幅はスプリッターでユーザーが調整した現在値を尊重。
+            // ただし合計が bodyW を超える場合は右ペインの最低幅(SPLIT_MIN_LIST_W)を優先して
+            // ツリーを縮める(極小ウィンドウでは右ペイン優先、の方針)。
+            var sbW = 8;        // splitterBar幅
+            var gap = 2;        // resultBody.spacing
+            var treeW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
+            var maxTreeW2 = bodyW - SPLIT_MIN_LIST_W - sbW - gap * 2;
+            if (treeW > maxTreeW2) treeW = maxTreeW2;         // 右ペイン最低幅を優先して縮める
+            if (treeW < SPLIT_MIN_TREE_W && maxTreeW2 >= SPLIT_MIN_TREE_W) treeW = SPLIT_MIN_TREE_W;
+            if (treeW < 50) treeW = 50;                        // 極小ウィンドウ時の最終ガード
+            var listW = bodyW - treeW - sbW - gap * 2;
+            if (listW < 100) listW = 100;
+
+            // ---- 各要素の絶対配置(resultBody内、位置もspacing込みで明示) ----
+            treeContainer.location = [0, 0];
+            treeContainer.size = [treeW, bodyH];
+            // 次に layout.layout(true) が走った時もこの幅が基準になるよう preferredSize も同期
+            safe(function () { treeContainer.preferredSize.width = treeW; return null; }, null);
+            splitterBar.location = [treeW + gap, 0];
+            splitterBar.size = [sbW, bodyH];
+            listContainer.location = [treeW + gap + sbW + gap, 0];
+            listContainer.size = [listW, bodyH];
+
+            // ツリー本体もパネル内マージン実測値でフィット(内部スクロールは treeview 自身が持つ)
+            safe(function () {
+                var tx = tree.location ? tree.location[0] : 4;
+                var ty = tree.location ? tree.location[1] : 16;
+                tree.size = [treeW - tx * 2, bodyH - ty - tx];
+                return null;
+            }, null);
+
+            // ---- 右ペイン内の縦分配 ----
+            // detailList(伸縮)→選択してズームボタン(固定)→説明欄(固定)→ステータス欄(固定)。
+            // 下部要素の実測高を bodyH から引いた残りを detailList に与えることで、
+            // ボタン・説明欄・ステータス欄が常にウィンドウ内に収まる。
+            safe(function () {
+                var innerSpacing = 6; // listContainer.spacing
+                var lx = detailList.location ? detailList.location[0] : 4;
+                var ly = detailList.location ? detailList.location[1] : 16;
+                var btnH = selectBtnGroup.size ? selectBtnGroup.size[1] : 30;
+                var noteH = noteText.size ? noteText.size[1] : 56;
+                var statusH = selStatusText.size ? selStatusText.size[1] : 42;
+                var innerW = listW - lx * 2;
+                if (innerW < 80) innerW = 80;
+                var fixedH = (btnH + innerSpacing) + (noteH + innerSpacing) + (statusH + innerSpacing);
+                var dlH = bodyH - ly - fixedH - lx; // 下マージンは左マージンと同等とみなす
+                if (dlH < 80) dlH = 80;
+                detailList.size = [innerW, dlH];
+                detailList.location = [lx, ly];
+                var y2 = ly + dlH + innerSpacing;
+                selectBtnGroup.location = [lx, y2];
+                y2 += btnH + innerSpacing;
+                noteText.location = [lx, y2];
+                noteText.size = [innerW, noteH];
+                y2 += noteH + innerSpacing;
+                selStatusText.location = [lx, y2];
+                selStatusText.size = [innerW, statusH];
+                return null;
+            }, null);
+
+            dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] 完了: win=" + fmtArr(win.size) +
+                " availW=" + availW + " availH=" + availH +
+                " bodyW=" + bodyW + " bodyH=" + bodyH +
+                " treeW=" + treeW + " listW=" + listW +
+                " detailList.size=" + fmtArr(safe(function () { return detailList.size; }, null)) +
+                " selectBtnGroup.location=" + fmtArr(safe(function () { return selectBtnGroup.location; }, null)) +
+                " selStatusText.bounds=" + fmtArr(safe(function () { return selStatusText.bounds; }, null)));
+        } catch (eRFit) {
+            dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] 例外発生: " + eRFit.toString());
+        }
+    }
+
     // ---- splitter: 幅の適用/クランプ処理(ドラッグ処理から使用) ----
     function applySplitTreeWidth(newW) {
         try {
@@ -3029,6 +3135,9 @@ function buildAndShowDialog() {
             if (maxTreeW > SPLIT_MIN_TREE_W && newW > maxTreeW) newW = maxTreeW;
             treeContainer.preferredSize.width = newW;
             win.layout.layout(true);
+            // 【v1.13.0】layout.layout(true)は内部コンテナを自然サイズへ戻し得るため、
+            // 直後に必ずウィンドウ実サイズへのフィットを再適用する(v1.12.0と同じ原則)
+            applyResultWindowFit("afterSplit");
         } catch (eApply) {}
     }
 
@@ -3158,6 +3267,9 @@ function buildAndShowDialog() {
         populateTree(results);
         win.text = TITLE_RESULT_PREFIX + doc.name;
         win.layout.layout(true);
+        // 【v1.13.0】layout.layout(true)直後に必ずウィンドウ実サイズへのフィットを適用
+        // (小さい画面のMacで結果画面の下部が切れて操作不能になる問題への対処)
+        applyResultWindowFit("showResults");
     }
 
     backBtn.onClick = function () {
@@ -3283,6 +3395,9 @@ function buildAndShowDialog() {
         dlog("SCROLL", "win.onResize発火: 新しいwin.size=" + fmtArr(win.size) + " resultPanel.visible=" + resultPanel.visible);
         if (resultPanel.visible) {
             this.layout.resize();
+            // 【v1.13.0】layout.resize()は内部コンテンツを自然サイズへ戻し得るため、
+            // 直後に必ずウィンドウ実サイズへのフィットを再適用する(v1.12.0と同じ原則)
+            applyResultWindowFit("onResize");
         } else {
             applySettingsResize();
         }
