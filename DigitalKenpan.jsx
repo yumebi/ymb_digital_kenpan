@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.16.0";
+var KENPAN_VERSION = "1.17.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -2563,10 +2563,12 @@ function buildAndShowDialog() {
                 " screens[0]=" + fmtScreen(safe(function () { return $.screens[0]; }, null)));
             settingsContent.minimumSize = [0, 0];
             settingsContent.maximumSize = [100000, 100000];
-            // 【v1.16.0・再入防止】win.layout.layout(true)はwin.onResizeを誘発し得るため、
-            // safeWinLayout()でFIT_IN_PROGRESSを立てた区間だけ実行する
-            // (win.onResize側のガードで再入を止める。try/finally保護で例外時もフラグは戻る)。
-            safeWinLayout(win);
+            // 【v1.16.0・再入防止→v1.17.0・確定原因により対象を変更】
+            // win全体を対象にlayout.layout(true)すると、Windows実機でwin.size自体が
+            // +25px前後増加する副作用が確認された。自然サイズの測定にはsettingsContent自身の
+            // layoutで十分(子要素から自然サイズがボトムアップで再計算されるため)なので、
+            // winではなくsettingsContentを対象にする(ウィンドウサイズへの副作用を回避)。
+            safeWinLayout(settingsContent);
             // コンテンツの自然高・自然幅を実測して固定し、以後のlayout処理で縮まないようにする
             // (layout.resize()がcolumn内でコンテンツをビューポート高/幅に縮めてしまうと、
             //  実高/実幅=可視高/可視幅になりスクロール不要と誤判定されるため)
@@ -2751,12 +2753,12 @@ function buildAndShowDialog() {
         var ok1 = safeWinLayout(settingsViewportRow);
         dlog("SCROLL", "再レイアウト手段1(settingsViewportRow.layout.layout)[" + tagR + "]: 成功=" + ok1);
 
-        // 手段2: ウィンドウ全体の再レイアウト。
-        // 【注意】以前このウィンドウ全体版はドラッグリサイズ中の毎フレーム呼び出しが原因で
-        // 余白が累積するバグの元だったが、ここではenabled状態が「変化した時だけ」呼ばれるため
-        // 頻度は低く、安全と判断して試す(累積再発の有無はログと実機確認で見る)。
-        var ok2 = safeWinLayout(win);
-        dlog("SCROLL", "再レイアウト手段2(win.layout.layout)[" + tagR + "]: 成功=" + ok2);
+        // 【v1.17.0・確定原因により削除】旧・手段2(win.layout.layout(true))は、
+        // Windows実機ログで「呼ぶたびにwin.size自体が+25px前後増加する」という
+        // OSレベルの副作用が実証されたため完全に削除した。この関数はスクロールバーの
+        // enabled切替のたびに呼ばれる高頻度パスであり、リサイズを繰り返すたびに
+        // ウィンドウが際限なく伸びる「体感」の直接原因だった。手段1(個別コンテナの
+        // layout.layout)はウィンドウサイズへの副作用が無いと考えられるため残す。
 
         // 手段3: ScriptUIの notify() による明示的な再描画通知(存在すれば)。
         // "onDraw" はScriptUIの標準イベント名として文書化されていないため効果は未知数だが、
@@ -3236,8 +3238,11 @@ function buildAndShowDialog() {
         try {
             resultBody.minimumSize = [0, 0];
             resultBody.maximumSize = [100000, 100000];
-            // 【v1.16.0・再入防止】win.onResizeを誘発し得るためsafeWinLayout()経由で実行
-            safeWinLayout(win);
+            // 【v1.16.0・再入防止→v1.17.0・確定原因により対象を変更】
+            // win全体のlayoutはWindows実機でwin.size自体を+25px前後増加させる副作用が
+            // 確認された。自然サイズの測定にはresultBody自身のlayoutで十分なので、
+            // winではなくresultBodyを対象にする。
+            safeWinLayout(resultBody);
             resultBodyNaturalW = resultBody.size[0];
             resultBodyNaturalH = resultBody.size[1];
             if (!resultBodyNaturalW || resultBodyNaturalW < 10) {
@@ -3359,14 +3364,16 @@ function buildAndShowDialog() {
     }
 
     // 設定画面のforceScrollbarReflowと同じ多層防御(ログ確認用に温存)。
-    // 【v1.16.0・再入防止】設定画面側と同じ理由で、関数全体は覆わず手段1・2のみ個別に囲む
+    // 【v1.16.0・再入防止】設定画面側と同じ理由で、関数全体は覆わず手段1のみ個別に囲む
     // (末尾の applyResultWindowFit の正常実行を妨げないため)。
+    // 【v1.17.0・確定原因により手段2を削除】win.layout.layout(true)はWindows実機ログで
+    // win.size自体を+25px前後増加させる副作用が確認された。この関数はスクロールバーの
+    // enabled切替のたびに呼ばれる高頻度パスのため、リサイズを繰り返すたびにウィンドウが
+    // 際限なく伸びる直接原因だった。設定画面側と同じ理由で完全に削除する。
     function forceResultScrollbarReflow(reason) {
         var tagR = reason ? reason : "(不明)";
         var ok1 = safeWinLayout(resultViewportRow);
         dlog("RESULT-FIT", "再レイアウト手段1(resultViewportRow.layout.layout)[" + tagR + "]: 成功=" + ok1);
-        var ok2 = safeWinLayout(win);
-        dlog("RESULT-FIT", "再レイアウト手段2(win.layout.layout)[" + tagR + "]: 成功=" + ok2);
         var ok3 = safe(function () {
             if (resultVScrollbar.notify) { resultVScrollbar.notify("onDraw"); return true; }
             return false;
@@ -3399,8 +3406,13 @@ function buildAndShowDialog() {
         try {
             if (newW < SPLIT_MIN_TREE_W) newW = SPLIT_MIN_TREE_W;
             treeContainer.preferredSize.width = newW;
-            // 【v1.16.0・再入防止】win.onResizeを誘発し得るためsafeWinLayout()経由で実行
-            safeWinLayout(win);
+            // 【v1.16.0・再入防止→v1.17.0・確定原因により削除】
+            // ここで直前まで safeWinLayout(win) を呼んでいたが、(a) win全体のlayoutは
+            // Windows実機でwin.size自体を増加させる副作用があり、(b) この関数は
+            // スプリッタードラッグ中に高頻度で呼ばれるため、その副作用が積み重なって
+            // 「ドラッグするたびにウィンドウが伸びる」症状の一因になっていた。
+            // (c) 直後の captureResultBodyNatural が resultBody 単位で自前にlayoutを
+            // 実行するため、ここでの呼び出しは元々冗長でもあった。よって完全に削除する。
             // ツリー幅が変わった=resultBodyの自然幅も変わったため、再測定してから再フィットする
             captureResultBodyNatural("afterSplit");
             applyResultWindowFit("afterSplit");
@@ -3533,7 +3545,9 @@ function buildAndShowDialog() {
         finishSizeText.text = results.finishSizeText ? ("検出した仕上がりサイズ: " + results.finishSizeText) : "";
         populateTree(results);
         win.text = TITLE_RESULT_PREFIX + doc.name;
-        safeWinLayout(win); // 【v1.16.0・再入防止】win.onResizeを誘発し得るため
+        // 【v1.17.0・監査済み】ここは画面切替(設定→結果)の1回限りのタイミングであり、
+        // 高頻度パス(リサイズ/スクロールバー再描画)ではないため win 対象のlayoutを許容する。
+        safeWinLayout(win);
         // 【v1.15.0】表示直後にresultBodyの自然サイズを実測・固定してからフィット+スクロール範囲を計算する
         // (小さい画面のMacで結果画面の下部が切れて操作不能になる問題への対処。設定画面と同じ手順)
         captureResultBodyNatural("showResults");
@@ -3546,7 +3560,8 @@ function buildAndShowDialog() {
         settingsPanel.visible = true;
         selStatusText.text = "";
         win.text = TITLE_SETTINGS;
-        safeWinLayout(win); // 【v1.16.0・再入防止】win.onResizeを誘発し得るため
+        // 【v1.17.0・監査済み】画面切替(結果→設定)の1回限りのタイミングのため win 対象を許容。
+        safeWinLayout(win);
         applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
         updateSettingsScrollRange();
     };
@@ -3587,7 +3602,8 @@ function buildAndShowDialog() {
         selStatusText.text = "";
         resultBody.visible = false;
         resultBtnGroup.visible = false;
-        safeWinLayout(win); // 【v1.16.0・再入防止】win.onResizeを誘発し得るため
+        // 【v1.17.0・監査済み】検版実行の開始1回限り(スキャン中に繰り返し呼ばれるパスではない)
+        safeWinLayout(win);
 
         var results = null;
         var wasAborted = false;
@@ -3639,7 +3655,8 @@ function buildAndShowDialog() {
             settingsPanel.visible = true;
             summaryText.text = "";
             win.text = TITLE_SETTINGS;
-            safeWinLayout(win); // 【v1.16.0・再入防止】win.onResizeを誘発し得るため
+            // 【v1.17.0・監査済み】検版の中断/エラー時、設定画面へ戻る1回限りのタイミング
+            safeWinLayout(win);
             applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
             updateSettingsScrollRange();
             if (wasAborted) {
@@ -3726,7 +3743,8 @@ function buildAndShowDialog() {
     // (特にMacで顕著。自然サイズのまま画面より大きいウィンドウが生成され、
     // 画面外にはみ出た下端のボタン列やスクロールバーが見えなくなる、という今回の症状と一致する)。
     // 表示前に明示的にレイアウトを確定させ、上限を超えていれば強制的に縮めてから表示する。
-    safeWinLayout(win); // 【v1.16.0・再入防止】win.show()前だが念のため保護
+    // 【v1.17.0・監査済み】win.show()前の起動時1回限りの処理のため win 対象を許容。
+    safeWinLayout(win);
     if (win.maximumSize && win.size) {
         var clampW = win.size[0] > win.maximumSize[0] ? win.maximumSize[0] : win.size[0];
         var clampH = win.size[1] > win.maximumSize[1] ? win.maximumSize[1] : win.size[1];
