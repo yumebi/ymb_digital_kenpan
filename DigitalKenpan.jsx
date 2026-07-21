@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.13.0";
+var KENPAN_VERSION = "1.14.0";
 
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
@@ -90,6 +90,20 @@ function fmtScreen(scr) {
     try {
         return "{left:" + scr.left + ",top:" + scr.top + ",right:" + scr.right + ",bottom:" + scr.bottom + "}";
     } catch (e) { return "(取得失敗:" + e.toString() + ")"; }
+}
+
+// 【v1.14.0】パネルの区切りを「枠線」ではなく「面(背景色)」で見せるためのヘルパー。
+// ScriptUIのpanel枠線色は直接変更できず、ダークUIでは細い枠線の視認性が悪いため、
+// 残したパネルには背景をわずかに明るいグレーにして面で区切る。
+// Illustratorのダークパネル背景(約0.32グレー)より6%程度明るい値を使用。
+// graphics APIがMac等で効かない環境でもsafe()が例外を吸収し、枠線表示のまま劣化なしで動く。
+var PANEL_BACKDROP_GRAY = 0.38;
+function applyPanelBackdrop(p) {
+    safe(function () {
+        p.graphics.backgroundColor = p.graphics.newBrush(
+            p.graphics.BrushType.SOLID_COLOR, [PANEL_BACKDROP_GRAY, PANEL_BACKDROP_GRAY, PANEL_BACKDROP_GRAY], 1);
+        return null;
+    }, null);
 }
 
 // -----------------------------------------------------------------------------
@@ -2365,13 +2379,19 @@ function buildAndShowDialog() {
     screens.alignChildren = ["fill", "fill"];
     screens.alignment = ["fill", "fill"]; // ウィンドウリサイズ時に伸縮
 
-    var settingsPanel = screens.add("panel", undefined, "事前設定");
+    // 【v1.14.0・枠線の視認性改善】最外周の「事前設定」「検査結果」はpanel(枠付き)から
+    // group(枠なし)に変更。ダークUIでは細い枠線が二重三重に重なると区切りが判別しにくく
+    // なるため、外周の枠を取り除いて枠線の本数自体を減らし、内側のカテゴリパネル
+    // (仕上がりサイズ/印刷カラー数/各種数値設定/チェック項目/項目一覧/検出オブジェクト一覧)
+    // だけに枠+背景色(面での区切り)を残す。タイトル文言はウィンドウのタイトルバーで
+    // 判別できるため情報の損失はない。構造・コントロールの位置関係は変更していない。
+    var settingsPanel = screens.add("group");
     settingsPanel.orientation = "column";
     settingsPanel.alignChildren = ["fill", "top"];
     settingsPanel.margins = 12;
     settingsPanel.spacing = 6;
 
-    var resultPanel = screens.add("panel", undefined, "検査結果");
+    var resultPanel = screens.add("group");
     resultPanel.orientation = "column";
     resultPanel.alignChildren = ["fill", "top"];
     resultPanel.margins = 12;
@@ -2428,7 +2448,8 @@ function buildAndShowDialog() {
     var settingsContent = settingsViewport.add("group");
     settingsContent.orientation = "column";
     settingsContent.alignChildren = ["fill", "top"];
-    settingsContent.spacing = 6;
+    // 【v1.14.0】カテゴリパネル間のspacingを6→10に拡大し、視覚的な区切りを強調
+    settingsContent.spacing = 10;
     settingsContent.margins = 0;
 
     // 【Mac対策】boundsをundefinedのまま生成すると、生成時点の暫定サイズ(幅≒高さに近い正方形)から
@@ -2535,22 +2556,31 @@ function buildAndShowDialog() {
             // screens(win直下)の左上オフセット=ウィンドウのマージン(左右対称と仮定)
             var scrX = screens.location ? screens.location[0] : 8;
             var scrY = screens.location ? screens.location[1] : 8;
-            var availW = winW - scrX * 2;
-            var availH = winH - scrY - scrX; // 下マージンは左右と同等とみなす(僅かなズレは許容)
+            // 【v1.14.0】スクロールバーをウィンドウ右端に密着させるため、右マージンは
+            // SB_EDGE_GAP(2px)だけ残して使い切る(従来は左右対称マージンで、
+            // scrX+rowX ≈ 20px以上の隙間がスクロールバー右に生じていた)。
+            var SB_EDGE_GAP = 2;
+            var availW = winW - scrX - SB_EDGE_GAP; // 左=scrX / 右=2px のみ
+            var availH = winH - scrY - scrX; // 下マージンは左と同等とみなす(僅かなズレは許容)
             if (availW < 200) availW = 200;
             if (availH < 150) availH = 150;
             screens.size = [availW, availH];
             settingsPanel.size = [availW, availH]; // stack内の子はscreensと同位置・同寸
             // settingsViewportRow は settingsPanel 内(x=パネルmargins、y=ボタン行の下)
+            var panelX = settingsPanel.location ? settingsPanel.location[0] : 0; // stack内で通常0
             var rowX = settingsViewportRow.location ? settingsViewportRow.location[0] : 12;
             var rowY = settingsViewportRow.location ? settingsViewportRow.location[1] : 40;
-            var rowW = availW - rowX * 2;
+            // 行の右端をウィンドウクライアント右端-2pxまで届かせる
+            // (行のウィンドウ内絶対x = scrX + panelX + rowX。ローカル座標系の親オフセットを
+            //  差し引いて逆算する)
+            var rowAbsX = scrX + panelX + rowX;
+            var rowW = winW - rowAbsX - SB_EDGE_GAP;
             var rowH = availH - rowY - 12; // パネル下マージン(12)ぶんを引く
             if (rowW < 120) rowW = 120;
             if (rowH < 80) rowH = 80;
             settingsViewportRow.size = [rowW, rowH];
-            // スクロールバーは行の右端「内側」に絶対配置(ここが今回の核心。
-            // 従来は自然幅ベースの位置のままウィンドウ外に出ていた)
+            // スクロールバーは行の右端「内側」に絶対配置。行の右端自体がウィンドウ右端-2pxに
+            // 一致するため、スクロールバー右端はウィンドウ右端にほぼ密着する。
             var sbW = 16;
             settingsScrollbar.size = [sbW, rowH];
             settingsScrollbar.location = [rowW - sbW, 0];
@@ -2717,6 +2747,7 @@ function buildAndShowDialog() {
     var sizeGroup = settingsContent.add("panel", undefined, "仕上がりサイズ");
     sizeGroup.orientation = "row";
     sizeGroup.alignChildren = ["left", "center"];
+    applyPanelBackdrop(sizeGroup); // 【v1.14.0】面での区切り(背景をわずかに明るく)
     sizeGroup.add("statictext", undefined, "サイズ:");
     var sizeDropdown = sizeGroup.add("dropdownlist", undefined, []);
     for (var si = 0; si < SIZE_PRESET_KEYS.length; si++) {
@@ -2747,6 +2778,7 @@ function buildAndShowDialog() {
     // --- 印刷カラー数 ---
     var colorGroup = settingsContent.add("panel", undefined, "印刷カラー数");
     colorGroup.orientation = "row";
+    applyPanelBackdrop(colorGroup); // 【v1.14.0】面での区切り
     colorGroup.add("statictext", undefined, "カラー数:");
     var colorDropdown = colorGroup.add("dropdownlist", undefined, []);
     for (var ci = 0; ci < COLOR_MODE_KEYS.length; ci++) {
@@ -2763,6 +2795,7 @@ function buildAndShowDialog() {
     var numGroup = settingsContent.add("panel", undefined, "各種数値設定");
     numGroup.orientation = "column";
     numGroup.alignChildren = ["left", "top"];
+    applyPanelBackdrop(numGroup); // 【v1.14.0】面での区切り
     var numRow1 = numGroup.add("group");
     numRow1.add("statictext", undefined, "塗り足し幅(mm):");
     var bleedField = numRow1.add("edittext", undefined, String(cfg.bleedMM)); bleedField.characters = 5;
@@ -2808,6 +2841,7 @@ function buildAndShowDialog() {
     var checkPanel = settingsContent.add("panel", undefined, "チェック項目");
     checkPanel.orientation = "row";
     checkPanel.alignChildren = ["left", "top"];
+    applyPanelBackdrop(checkPanel); // 【v1.14.0】面での区切り
     var checkColGroups = [];
     for (var cc = 0; cc < CATEGORY_ORDER.length; cc++) {
         var colG = checkPanel.add("group");
@@ -2955,6 +2989,7 @@ function buildAndShowDialog() {
 
     var treeContainer = resultBody.add("panel", undefined, "項目一覧");
     treeContainer.alignChildren = ["fill", "fill"];
+    applyPanelBackdrop(treeContainer); // 【v1.14.0】面での区切り
     // 【v8】splitterで幅を制御するため、横方向は fill にせず自前のpreferredSize.widthに従わせる
     // (残りの幅は listContainer 側が fill で吸収する)。
     treeContainer.alignment = ["left", "fill"];
@@ -2983,6 +3018,7 @@ function buildAndShowDialog() {
 
     var listContainer = resultBody.add("panel", undefined, "検出オブジェクト一覧");
     listContainer.orientation = "column";
+    applyPanelBackdrop(listContainer); // 【v1.14.0】面での区切り
     // 【v8修正】ウィンドウを縦に伸ばすと一覧/ボタン/説明欄の間隔が広がる問題への対策。
     // alignChildrenは["fill","top"]のままだが、各子要素の alignment を明示指定に変える
     // (継承任せにしない)。fillを持つのは detailList だけにし、他は top固定で
