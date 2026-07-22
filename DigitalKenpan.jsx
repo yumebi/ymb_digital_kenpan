@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.27.0";
+var KENPAN_VERSION = "1.28.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3768,6 +3768,17 @@ function buildAndShowDialog() {
         settingsPanel.visible = false;
         resultPanel.visible = true;
         progressGroup.visible = false;
+        // 【v1.28.0・確定原因への対処】progressGroup(進捗バー・ラベル・中断ボタン列)を
+        // 可視状態にする側(runBtn.onClick、下記参照)では直後に safeWinLayout(resultPanel)
+        // を呼んでいたが、非表示に戻すこちら側には対応するresultPanel再レイアウトが
+        // 無かった。win全体を対象にした後段のsafeWinLayout(win)だけでは、一度大きく
+        // レイアウトされたresultPanel内の縦積み(resultBtnGroup→summaryText→
+        // finishSizeText→progressGroup→resultViewportRow)がprogressGroup分だけ
+        // 縮まずに残ってしまい、「検出した仕上がりサイズ」表示とresultViewportRow(一覧領域)
+        // の間に progressGroup の高さ分(進捗バー+ラベル+中断ボタン列 ≒ 100px超)の
+        // 余白が残っていた。show側と対称にresultPanel自体のレイアウトを明示的に
+        // 再計算させることで、この余白を解消する。
+        safeWinLayout(resultPanel);
         summaryText.text = currentSummary.allOk ?
             ("✔ 全項目OK" + (currentSummary.infoCount > 0 ? "(情報 " + currentSummary.infoCount + "件)" : "")) :
             ("✖ エラー " + currentSummary.ngCount + "件・警告 " + currentSummary.warnCount + "件・情報 " + currentSummary.infoCount + "件");
@@ -3881,6 +3892,10 @@ function buildAndShowDialog() {
 
         // finally相当の後始末: どのルートでも必ずUI状態を復元する
         progressGroup.visible = false;
+        // 【v1.28.0】表示側(上のprogressGroup.visible = true直後)と対称に、非表示に戻す際も
+        // resultPanel自体のレイアウトを明示的に再計算させ、「仕上がりサイズ」表示と一覧領域の
+        // 間に不要な余白が残らないようにする(詳細はshowResultsScreen内の同種コメント参照)。
+        safeWinLayout(resultPanel);
         progressBar.value = 0;
         progressLabel.text = "";
 
