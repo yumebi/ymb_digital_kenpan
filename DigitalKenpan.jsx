@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.17.0";
+var KENPAN_VERSION = "1.18.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -2641,7 +2641,10 @@ function buildAndShowDialog() {
             // scrX+rowX ≈ 20px以上の隙間がスクロールバー右に生じていた)。
             var SB_EDGE_GAP = 2;
             var availW = winW - scrX - SB_EDGE_GAP; // 左=scrX / 右=2px のみ
-            var availH = winH - scrY - scrX; // 下マージンは左と同等とみなす(僅かなズレは許容)
+            // 【v1.18.0】横スクロールバーをウィンドウ下端に密着させるため、下マージンも
+            // SB_EDGE_GAP(2px)だけ残して使い切る(従来はscrX(≒8px)相当+後段の
+            // 「パネル下マージン12px」控除の合計20px前後の隙間が下端に生じていた)。
+            var availH = winH - scrY - SB_EDGE_GAP;
             if (availW < 200) availW = 200;
             if (availH < 150) availH = 150;
             screens.size = [availW, availH];
@@ -2655,11 +2658,13 @@ function buildAndShowDialog() {
             //  差し引いて逆算する)
             var rowAbsX = scrX + panelX + rowX;
             var rowW = winW - rowAbsX - SB_EDGE_GAP;
-            // 【v1.15.0】横スクロールバー行(settingsHScrollRow)の高さ+spacing(6px想定)を
+            // 【v1.15.0→v1.18.0】横スクロールバー行(settingsHScrollRow)の高さ+spacing(6px想定)を
             // 縦方向の可用高から先に差し引いておく(縦スクロール可視領域rowHの計算に反映)。
+            // 旧「パネル下マージン12px」の控除は、availH側で既にSB_EDGE_GAPまで使い切る計算に
+            // 変更したため廃止(横スクロールバー下端がウィンドウ下端-2pxに一致するようになる)。
             var hScrollH = 16;
             var hScrollGap = 6;
-            var rowH = availH - rowY - 12 - hScrollH - hScrollGap; // パネル下マージン(12)ぶんも引く
+            var rowH = availH - rowY - hScrollH - hScrollGap;
             if (rowW < 120) rowW = 120;
             if (rowH < 80) rowH = 80;
             settingsViewportRow.size = [rowW, rowH];
@@ -3211,7 +3216,10 @@ function buildAndShowDialog() {
     selectBtnGroup.add("statictext", undefined, "(行のダブルクリックでもジャンプします)");
 
     var noteText = listContainer.add("statictext", undefined, "", { multiline: true });
-    noteText.preferredSize = [340, 56];
+    // 【v1.18.0】長い「原因と対応」の説明文が高さ不足で途中から見切れることがあったため、
+    // 従来の56pxから80pxへ拡大(multiline:trueは効いているが、非fillの固定高さのため、
+    // 実際の折り返し行数より箱が低いと下側が単純にクリップされていた)。
+    noteText.preferredSize = [340, 80];
     noteText.alignment = ["fill", "top"];
     // 【v8】「原因と対応」の説明文の視認性向上。Illustratorパネルの暗い背景に対してコントラストの
     // 高い暖色系(アンバー寄り、0〜1スケール)を明示指定し、太字にする。
@@ -3222,7 +3230,12 @@ function buildAndShowDialog() {
         return null;
     }, null);
     var selStatusText = listContainer.add("statictext", undefined, "", { multiline: true });
-    selStatusText.preferredSize = [340, 42];
+    // 【v1.18.0確定原因】選択操作の状況メッセージ(例:「1件を選択しました。」+ロック解除の
+    // 説明文が改行連結されたもの)が3〜5行になることがあるのに対し、従来の高さ42px(約2行分)
+    // では足りず、multiline:true自体は効いていても非fillの固定高さのため文中で単純にクリップ
+    // されていた。90px(約4〜5行分)へ拡大する。全文が入りきらない場合でも、resultViewportの
+    // 縦スクロールバー(v1.15.0で導入済み)でスクロールして続きを読める。
+    selStatusText.preferredSize = [340, 90];
     selStatusText.alignment = ["fill", "top"];
 
     // 【v1.15.0・方式転換】結果画面も設定画面と同じ「固定サイズのコンテンツ+スクロールバーで
@@ -3273,7 +3286,9 @@ function buildAndShowDialog() {
             var scrY = screens.location ? screens.location[1] : 8;
             var SB_EDGE_GAP = 2;
             var availW = winW - scrX - SB_EDGE_GAP;
-            var availH = winH - scrY - scrX;
+            // 【v1.18.0】設定画面と同様、下マージンもSB_EDGE_GAP(2px)まで使い切り、
+            // 横スクロールバーをウィンドウ下端に密着させる。
+            var availH = winH - scrY - SB_EDGE_GAP;
             if (availW < 300) availW = 300;
             if (availH < 200) availH = 200;
             screens.size = [availW, availH];
@@ -3285,7 +3300,9 @@ function buildAndShowDialog() {
             var rowAbsX = scrX + panelX + rowX;
             var rowW = winW - rowAbsX - SB_EDGE_GAP;
             var hScrollH = 16, hScrollGap = 6;
-            var rowH = availH - rowY - 12 - hScrollH - hScrollGap;
+            // 【v1.18.0】旧「パネル下マージン12px」控除を廃止(availH側で既にSB_EDGE_GAPまで
+            // 使い切る計算に変更したため)。横スクロールバー下端がウィンドウ下端-2pxに一致する。
+            var rowH = availH - rowY - hScrollH - hScrollGap;
             if (rowW < 250) rowW = 250;
             if (rowH < 150) rowH = 150;
             resultViewportRow.size = [rowW, rowH];
