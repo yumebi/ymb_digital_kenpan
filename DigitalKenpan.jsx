@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.28.0";
+var KENPAN_VERSION = "1.29.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3146,6 +3146,11 @@ function buildAndShowDialog() {
     // 注意: ExtendScriptの同期実行中はボタンのクリックイベントが処理されないことがあるため、
     // 主手段は ESC キーのポーリング(throwIfAborted)。ボタンは補助手段。
     abortBtn.onClick = function () { ABORT_FLAG.on = true; };
+    // 【v1.29.0】progressGroupを非表示化する際に高さを強制的に0へ潰すため、
+    // 表示状態で実測した「自然な高さ」をキャッシュしておく変数(実測されるまでの
+    // 暫定フォールバック値として90pxを入れておく。progressBar12px+progressLabel
+    // ~24px+progressAbortRow~24px+spacing分の概算)。
+    var progressGroupNaturalH = 90;
     progressGroup.visible = false;
 
     // 【v8→v9→v1.22.0】項目一覧(ツリー)と検出オブジェクト一覧の境界幅について、
@@ -3275,7 +3280,13 @@ function buildAndShowDialog() {
     // 伸縮させない)。listContainer自体もresultBody内で非fillの自然サイズになる。
     listContainer.alignChildren = ["fill", "top"];
     listContainer.alignment = ["fill", "top"];
-    listContainer.spacing = 6; // 間隔を固定値にして曖昧な継承由来のズレを排除
+    // 【v1.29.0】6→2へ縮小(「説明欄(noteText)とステータス欄(selStatusText)の間の
+    // 余白が大きすぎる」との指摘への対応。listContainerの子要素間(detailList/
+    // selectBtnGroup/noteText/selStatusText)すべてに一律で効く値のため、この4要素の
+    // 間隔がまとめて詰まる形になるが、いずれも「隙間が狭すぎて詰まって見える」ほどの
+    // 縮小ではないため、detailList/selectBtnGroup側のレイアウトも壊れない)。
+    listContainer.spacing = 2; // 間隔を固定値にして曖昧な継承由来のズレを排除
+
     listContainer.minimumSize.width = SPLIT_MIN_LIST_W;
     // 【v7→v8→v1.15.0→v1.22.0】検出オブジェクト一覧: v8時点の固定サイズ方式のまま、
     // 幅を380→540pxへ拡大(「検出オブジェクト一覧の幅が変わらない/狭い」との報告への対応。
@@ -3768,17 +3779,26 @@ function buildAndShowDialog() {
         settingsPanel.visible = false;
         resultPanel.visible = true;
         progressGroup.visible = false;
-        // 【v1.28.0・確定原因への対処】progressGroup(進捗バー・ラベル・中断ボタン列)を
-        // 可視状態にする側(runBtn.onClick、下記参照)では直後に safeWinLayout(resultPanel)
-        // を呼んでいたが、非表示に戻すこちら側には対応するresultPanel再レイアウトが
-        // 無かった。win全体を対象にした後段のsafeWinLayout(win)だけでは、一度大きく
-        // レイアウトされたresultPanel内の縦積み(resultBtnGroup→summaryText→
-        // finishSizeText→progressGroup→resultViewportRow)がprogressGroup分だけ
-        // 縮まずに残ってしまい、「検出した仕上がりサイズ」表示とresultViewportRow(一覧領域)
-        // の間に progressGroup の高さ分(進捗バー+ラベル+中断ボタン列 ≒ 100px超)の
-        // 余白が残っていた。show側と対称にresultPanel自体のレイアウトを明示的に
-        // 再計算させることで、この余白を解消する。
+        // 【v1.28.0で試行→効果なしと実機確認→v1.29.0で確定原因への再対処】
+        // v1.28.0ではsafeWinLayout(resultPanel)を追加したが、実機ログでrowYが変化せず
+        // (≒195pxのまま)、余白は解消しなかった。resultPanel(column)は非表示要素の
+        // 高さを依然として積算し続ける既知の癖があり、単純な再レイアウト呼び出しだけでは
+        // 不十分と判明した。visible=falseにするのと同時に、progressGroup自体の
+        // .size/.preferredSize/.maximumSizeの高さ成分を明示的に0へ強制することで、
+        // resultPanelの縦積み計算からこの分の高さを構造的に除外する
+        // (再表示時はrunBtn.onClick側でprogressGroupNaturalHを使って元に戻す)。
+        safe(function () {
+            var w0 = (progressGroup.size && progressGroup.size[0] > 0) ? progressGroup.size[0] : 620;
+            progressGroup.preferredSize = [w0, 0];
+            progressGroup.size = [w0, 0];
+            progressGroup.minimumSize = [0, 0];
+            progressGroup.maximumSize = [100000, 0];
+            return null;
+        }, null);
         safeWinLayout(resultPanel);
+        dlog("PROGRESS", "showResultsScreen: progressGroup非表示化後: size=" +
+            fmtArr(safe(function () { return progressGroup.size; }, null)) +
+            " resultViewportRow.location=" + fmtArr(safe(function () { return resultViewportRow.location; }, null)));
         summaryText.text = currentSummary.allOk ?
             ("✔ 全項目OK" + (currentSummary.infoCount > 0 ? "(情報 " + currentSummary.infoCount + "件)" : "")) :
             ("✖ エラー " + currentSummary.ngCount + "件・警告 " + currentSummary.warnCount + "件・情報 " + currentSummary.infoCount + "件");
@@ -3842,6 +3862,15 @@ function buildAndShowDialog() {
         settingsPanel.visible = false;
         resultPanel.visible = true;
         progressGroup.visible = true;
+        // 【v1.29.0】非表示化時(下記参照)に0へ強制した高さ制約を解除し、自然な高さに戻す。
+        safe(function () {
+            progressGroup.minimumSize = [0, 0];
+            progressGroup.maximumSize = [100000, 100000];
+            var w0 = (progressGroup.size && progressGroup.size[0] > 0) ? progressGroup.size[0] : 620;
+            progressGroup.preferredSize = [w0, progressGroupNaturalH];
+            progressGroup.size = [w0, progressGroupNaturalH];
+            return null;
+        }, null);
         summaryText.text = "検査中...(ESCキーで中断できます)";
         finishSizeText.text = "";
         selStatusText.text = "";
@@ -3854,6 +3883,16 @@ function buildAndShowDialog() {
         // 反映させることだけで、win全体のサイズを再計算する必要は無いため、対象を
         // resultPanel に変更する(winを一切触らない)。
         safeWinLayout(resultPanel);
+        // 【v1.29.0】表示・レイアウト確定直後に実際の高さを再実測し、次回の非表示化/復元用に
+        // キャッシュを更新しておく(自己補正: 内容が変わっても常に最新の実測値を使う)。
+        safe(function () {
+            var measured = progressGroup.size ? progressGroup.size[1] : 0;
+            if (measured > 10) progressGroupNaturalH = measured;
+            dlog("PROGRESS", "progressGroup可視化直後の実測: size=" + fmtArr(progressGroup.size) +
+                " preferredSize=" + fmtArr(progressGroup.preferredSize) +
+                " progressGroupNaturalH=" + progressGroupNaturalH);
+            return null;
+        }, null);
 
         var results = null;
         var wasAborted = false;
@@ -3892,10 +3931,21 @@ function buildAndShowDialog() {
 
         // finally相当の後始末: どのルートでも必ずUI状態を復元する
         progressGroup.visible = false;
-        // 【v1.28.0】表示側(上のprogressGroup.visible = true直後)と対称に、非表示に戻す際も
-        // resultPanel自体のレイアウトを明示的に再計算させ、「仕上がりサイズ」表示と一覧領域の
-        // 間に不要な余白が残らないようにする(詳細はshowResultsScreen内の同種コメント参照)。
+        // 【v1.28.0で試行→効果なし→v1.29.0で確定原因への再対処。詳細はshowResultsScreen内の
+        // 同種コメント参照】非表示に戻すと同時にprogressGroup自体の高さ制約を0へ強制することで、
+        // resultPanelの縦積み計算からこの分の高さを構造的に除外する。
+        safe(function () {
+            var w0 = (progressGroup.size && progressGroup.size[0] > 0) ? progressGroup.size[0] : 620;
+            progressGroup.preferredSize = [w0, 0];
+            progressGroup.size = [w0, 0];
+            progressGroup.minimumSize = [0, 0];
+            progressGroup.maximumSize = [100000, 0];
+            return null;
+        }, null);
         safeWinLayout(resultPanel);
+        dlog("PROGRESS", "runBtn.onClick後始末: progressGroup非表示化後: size=" +
+            fmtArr(safe(function () { return progressGroup.size; }, null)) +
+            " resultViewportRow.location=" + fmtArr(safe(function () { return resultViewportRow.location; }, null)));
         progressBar.value = 0;
         progressLabel.text = "";
 
