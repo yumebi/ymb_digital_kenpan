@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.20.0";
+var KENPAN_VERSION = "1.21.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3225,11 +3225,14 @@ function buildAndShowDialog() {
     applyPanelBackdrop(treeContainer); // 【v1.14.0】面での区切り
     // 【v8】splitterで幅を制御するため、横方向は fill にせず自前のpreferredSize.widthに従わせる
     // (残りの幅は listContainer 側が fill で吸収する)。
+    // 【v1.21.0】初期の幅比率を「項目一覧を狭く・検出オブジェクト一覧を広く」に変更
+    // (従来340pxから200pxへ。SPLIT_MIN_TREE_W=150は下回らない)。項目3のスプリッター
+    // ドラッグ修正とセットで、以後はユーザーがドラッグで自由に幅を調整できる。
     treeContainer.alignment = ["left", "fill"];
-    treeContainer.preferredSize.width = 340;
+    treeContainer.preferredSize.width = 200;
     treeContainer.minimumSize.width = SPLIT_MIN_TREE_W;
     var tree = treeContainer.add("treeview", undefined);
-    tree.preferredSize = [340, 240]; // 初期は控えめ。リサイズで拡大可能
+    tree.preferredSize = [200, 240]; // 初期は控えめ。リサイズで拡大可能
     tree.alignment = ["fill", "fill"];
 
     // ---- ドラッグ可能な境界バー ----
@@ -3498,13 +3501,18 @@ function buildAndShowDialog() {
         } catch (eApply) {}
     }
 
-    // ---- splitter: マウスドラッグ(試験実装) ----
-    // 【既知の制限】この場からはIllustrator実機での動作確認ができないため、
-    // Windows/Mac いずれについても実機での動作確認は取れていない(構文チェックのみ)。
-    // 特にMac(Cocoa)ではmousemoveイベントがドラッグ中に境界バーの外に出た時点で
-    // 届かなくなる可能性がある(v9で段階調整ボタンの代替手段は削除済みのため、
-    // その場合はドラッグでの幅調整ができなくなる)。全ハンドラをtry/catchで保護しており、
-    // 万一失敗してもv7までの固定レイアウトの見た目・動作(初期の3:4比率程度の固定幅)は壊さない。
+    // ---- splitter: マウスドラッグ ----
+    // 【v1.21.0・設計変更】以前は mousemove/mouseup を splitterBar(境界バー)と
+    // resultBody(グループ)の2箇所に仕込んでいたが、ユーザー報告で「ドラッグしても
+    // 一切反応しない」ことが確認された。ScriptUIでは Group/Panel 等のコンテナ要素への
+    // マウスイベントリスナーのサポートが非常に限定的(実質未サポートに近い)という
+    // 既知の制約があり、resultBody(Group)側のリスナーはそもそも発火していなかった
+    // 可能性が高い。一方 Window オブジェクト自体へのイベントリスナーはより確実に
+    // サポートされる傾向があるため、mousemove/mouseup は win(ウィンドウ自体)に
+    // 付け替える。mousedownはドラッグ開始の判定にバー上のクリックで十分なため
+    // 引き続き splitterBar に付ける。win全体のイベントになるため、
+    // splitDragState.active が立っていない時は何もしない(ドラッグ中でない通常の
+    // マウス移動では反応しない)ことを徹底する。
     var splitDragState = { active: false, startScreenX: 0, startTreeW: 0 };
     function splitDragMove(ev) {
         if (!splitDragState.active) return;
@@ -3521,12 +3529,11 @@ function buildAndShowDialog() {
                 splitDragState.startTreeW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
             } catch (eSD) {}
         });
-        splitterBar.addEventListener("mousemove", splitDragMove);
-        splitterBar.addEventListener("mouseup", function () { splitDragState.active = false; });
-        // バー外に出てもドラッグを続けられるよう、resultBody側でも同じイベントを拾えるようにする保険
-        // (効かない環境でも他の動作に影響しないようtry/catchで保護済み)
-        resultBody.addEventListener("mousemove", splitDragMove);
-        resultBody.addEventListener("mouseup", function () { splitDragState.active = false; });
+        // 【v1.21.0】mousemove/mouseupはwin(ウィンドウ自体)で拾う。
+        // splitDragState.activeがtrueの間だけsplitDragMoveが実際の処理を行うため、
+        // ドラッグ中でない通常のウィンドウ内マウス移動には反応しない。
+        win.addEventListener("mousemove", splitDragMove);
+        win.addEventListener("mouseup", function () { splitDragState.active = false; });
         return null;
     }, null);
 
@@ -3582,6 +3589,12 @@ function buildAndShowDialog() {
         // (lineHeightPx=24, minLines=2, maxLines=10。v1.20.0で安全マージンを拡大)。
         var noteEstimatedH = estimateTextBoxHeight(noteFullText, 340, 24, 2, 10);
         noteText.preferredSize = [340, noteEstimatedH];
+        // 【v1.21.0・確定原因により追加】実機ログで、preferredSizeを設定し直しても
+        // noteText.sizeが常に[380,80]固定のままだったことが判明した。既に一度レイアウト済みの
+        // リーフコントロールは、親コンテナへのlayout.layout(true)だけでは既存の.sizeが
+        // 更新されないというScriptUIの既知の癖のため。preferredSizeと同時に.sizeも
+        // 直接明示的に上書きする。
+        noteText.size = [340, noteEstimatedH];
         // 高さが変わった分、listContainer/resultBodyの自然サイズも変わるため、
         // 再測定(captureResultBodyNatural)→再フィット→スクロール範囲再計算の順で反映する。
         captureResultBodyNatural("noteTextResize");
@@ -3607,6 +3620,9 @@ function buildAndShowDialog() {
         selStatusText.text = msg;
         var statusEstimatedH = estimateTextBoxHeight(msg, 340, 24, 2, 10);
         selStatusText.preferredSize = [340, statusEstimatedH];
+        // 【v1.21.0・確定原因により追加】noteTextと同じ理由でpreferredSizeだけでは
+        // 既存の.sizeが更新されないため、.sizeも直接明示的に上書きする。
+        selStatusText.size = [340, statusEstimatedH];
         captureResultBodyNatural("selStatusResize");
         applyResultWindowFit("selStatusResize");
         updateResultScrollRange();
@@ -3716,8 +3732,13 @@ function buildAndShowDialog() {
         selStatusText.text = "";
         resultBody.visible = false;
         resultBtnGroup.visible = false;
-        // 【v1.17.0・監査済み】検版実行の開始1回限り(スキャン中に繰り返し呼ばれるパスではない)
-        safeWinLayout(win);
+        // 【v1.21.0・確定原因により修正】v1.17.0で「1回限りだから許容」と誤ってマークしていたが、
+        // win.layout.layout(true)はWindowsでwin.size自体を変化させる副作用があり(v1.17.0で確定)、
+        // ここを通るとユーザーがリサイズ済みのウィンドウが検版実行のたびにリセットされていた。
+        // ここで本当に必要なのは resultPanel/progressGroup 等の可視性トグルを内部的に
+        // 反映させることだけで、win全体のサイズを再計算する必要は無いため、対象を
+        // resultPanel に変更する(winを一切触らない)。
+        safeWinLayout(resultPanel);
 
         var results = null;
         var wasAborted = false;
