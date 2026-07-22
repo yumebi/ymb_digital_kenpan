@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.21.0";
+var KENPAN_VERSION = "1.22.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3148,13 +3148,10 @@ function buildAndShowDialog() {
     abortBtn.onClick = function () { ABORT_FLAG.on = true; };
     progressGroup.visible = false;
 
-    // 【v8→v9】項目一覧(ツリー)と検出オブジェクト一覧の境界幅を調整できるようにする。
-    // ScriptUIにネイティブのsplitterは無いため、境界バー(splitterBar)へのマウスドラッグで
-    // treeContainer.preferredSize.width を書き換える自前実装。
-    // 【v9】段階調整ボタン(「◀ 項目一覧を広げる」「検出オブジェクト一覧を広げる ▶」)は
-    // 「意味不明で不要」とのユーザー指摘により削除した。ドラッグ式splitter(splitterBar)は
-    // 特に苦情が無いため残す。幅変更ロジック(applySplitTreeWidth)自体はドラッグ処理からも
-    // 使う共通ロジックのためそのまま残している。
+    // 【v8→v9→v1.22.0】項目一覧(ツリー)と検出オブジェクト一覧の境界幅について、
+    // v8〜v1.21.0ではドラッグ式splitter(splitterBar)を試みてきたが、実機で一切反応せず
+    // v1.22.0でドラッグ機能自体を削除した(詳細は splitterBar 定義箇所のコメント参照)。
+    // SPLIT_MIN_TREE_W/SPLIT_MIN_LIST_W は各コンテナの minimumSize として引き続き使用する。
     var SPLIT_MIN_TREE_W = 150;
     var SPLIT_MIN_LIST_W = 200;
 
@@ -3223,19 +3220,19 @@ function buildAndShowDialog() {
     var treeContainer = resultBody.add("panel", undefined, "項目一覧");
     treeContainer.alignChildren = ["fill", "fill"];
     applyPanelBackdrop(treeContainer); // 【v1.14.0】面での区切り
-    // 【v8】splitterで幅を制御するため、横方向は fill にせず自前のpreferredSize.widthに従わせる
-    // (残りの幅は listContainer 側が fill で吸収する)。
-    // 【v1.21.0】初期の幅比率を「項目一覧を狭く・検出オブジェクト一覧を広く」に変更
-    // (従来340pxから200pxへ。SPLIT_MIN_TREE_W=150は下回らない)。項目3のスプリッター
-    // ドラッグ修正とセットで、以後はユーザーがドラッグで自由に幅を調整できる。
+    // 【v1.22.0】スプリッタードラッグ機能を削除したため、横方向は常に固定のpreferredSize.width
+    // に従う(可変にはならない)。resultBodyは「自然サイズ(=子要素の固定幅の合計)」で
+    // 扱われる設計(v1.15.0以降)のため、ここの数値がそのまま最終的な項目一覧の幅になる。
+    // 【v1.21.0で200pxに縮小→v1.22.0で260pxに戻す】200pxは狭すぎるとの報告があったため、
+    // 「項目一覧は狭すぎず、かつ検出オブジェクト一覧側にも十分な幅を残す」バランスで260pxにした。
     treeContainer.alignment = ["left", "fill"];
-    treeContainer.preferredSize.width = 200;
+    treeContainer.preferredSize.width = 260;
     treeContainer.minimumSize.width = SPLIT_MIN_TREE_W;
     var tree = treeContainer.add("treeview", undefined);
-    tree.preferredSize = [200, 240]; // 初期は控えめ。リサイズで拡大可能
+    tree.preferredSize = [260, 240]; // 初期は控えめ。リサイズで拡大可能
     tree.alignment = ["fill", "fill"];
 
-    // ---- ドラッグ可能な境界バー ----
+    // ---- 境界線(v1.22.0でドラッグ機能は削除、静的な区切り線として残す) ----
     var splitterBar = resultBody.add("group");
     splitterBar.orientation = "column";
     splitterBar.alignChildren = ["fill", "fill"];
@@ -3244,7 +3241,8 @@ function buildAndShowDialog() {
     splitterBar.minimumSize.width = 8;
     splitterBar.maximumSize.width = 8;
     splitterBar.margins = 0;
-    // 視覚的に「掴める場所」とわかるよう、明るめの縦線をbackgroundColorで描画する
+    // 【v1.22.0】以前は「掴める場所」とわかるよう明るめにしていたが、ドラッグ不可の
+    // 静的な区切り線になったため、単なる視覚的な区切り(グレーの縦線)として描画する。
     // (プロパティが無視される環境でも例外にならないようsafe()で保護)
     safe(function () {
         splitterBar.graphics.backgroundColor = splitterBar.graphics.newBrush(
@@ -3262,9 +3260,12 @@ function buildAndShowDialog() {
     listContainer.alignment = ["fill", "top"];
     listContainer.spacing = 6; // 間隔を固定値にして曖昧な継承由来のズレを排除
     listContainer.minimumSize.width = SPLIT_MIN_LIST_W;
-    // 【v7→v8→v1.15.0】検出オブジェクト一覧: v8時点の固定サイズ方式に戻し、少し余裕を持たせる。
+    // 【v7→v8→v1.15.0→v1.22.0】検出オブジェクト一覧: v8時点の固定サイズ方式のまま、
+    // 幅を380→540pxへ拡大(「検出オブジェクト一覧の幅が変わらない/狭い」との報告への対応。
+    // v1.15.0以降resultBodyは自然サイズ=子要素の固定幅の合計で扱われるため、この数値が
+    // そのまま最終的な一覧の幅になる)。
     var detailList = listContainer.add("listbox", undefined, [], { multiselect: true });
-    detailList.preferredSize = [380, 340]; // v8の[380,320]から少し余裕を持たせた値
+    detailList.preferredSize = [540, 340];
     detailList.minimumSize = [280, 200];
     // 【v1.15.0】固定高さに変更(伸縮させない)。他の要素(ボタン/説明欄/ステータス欄)と
     // 同じ非fill(top)にする。ウィンドウに追従して伸びる仕組みそのものを廃止し、
@@ -3283,7 +3284,8 @@ function buildAndShowDialog() {
     // 【v1.18.0】長い「原因と対応」の説明文が高さ不足で途中から見切れることがあったため、
     // 従来の56pxから80pxへ拡大(multiline:trueは効いているが、非fillの固定高さのため、
     // 実際の折り返し行数より箱が低いと下側が単純にクリップされていた)。
-    noteText.preferredSize = [340, 80];
+    // 【v1.22.0】幅も detailList と揃えて 340→540 に拡大。
+    noteText.preferredSize = [540, 80];
     noteText.alignment = ["fill", "top"];
     // 【v8】「原因と対応」の説明文の視認性向上。Illustratorパネルの暗い背景に対してコントラストの
     // 高い暖色系(アンバー寄り、0〜1スケール)を明示指定し、太字にする。
@@ -3299,7 +3301,8 @@ function buildAndShowDialog() {
     // では足りず、multiline:true自体は効いていても非fillの固定高さのため文中で単純にクリップ
     // されていた。90px(約4〜5行分)へ拡大する。全文が入りきらない場合でも、resultViewportの
     // 縦スクロールバー(v1.15.0で導入済み)でスクロールして続きを読める。
-    selStatusText.preferredSize = [340, 90];
+    // 【v1.22.0】幅も detailList と揃えて 340→540 に拡大。
+    selStatusText.preferredSize = [540, 90];
     selStatusText.alignment = ["fill", "top"];
 
     // 【v1.15.0・方式転換】結果画面も設定画面と同じ「固定サイズのコンテンツ+スクロールバーで
@@ -3479,63 +3482,17 @@ function buildAndShowDialog() {
     resultHScrollbar.onChanging = applyResultBodyScrollLocation;
     resultHScrollbar.onChange = applyResultBodyScrollLocation;
 
-    // ---- splitter: 幅の適用/クランプ処理(ドラッグ処理から使用) ----
-    // 【v1.15.0】固定サイズ方式への転換に伴い、ウィンドウ幅を基準にした上限クランプ
-    // (旧SPLIT_MIN_LIST_W由来のmaxTreeW計算)は廃止。オーバーフローはスクロールバーが
-    // 担うため、下限(SPLIT_MIN_TREE_W)のみでクランプし、ユーザーが自由に幅を選べるようにする。
-    function applySplitTreeWidth(newW) {
-        try {
-            if (newW < SPLIT_MIN_TREE_W) newW = SPLIT_MIN_TREE_W;
-            treeContainer.preferredSize.width = newW;
-            // 【v1.16.0・再入防止→v1.17.0・確定原因により削除】
-            // ここで直前まで safeWinLayout(win) を呼んでいたが、(a) win全体のlayoutは
-            // Windows実機でwin.size自体を増加させる副作用があり、(b) この関数は
-            // スプリッタードラッグ中に高頻度で呼ばれるため、その副作用が積み重なって
-            // 「ドラッグするたびにウィンドウが伸びる」症状の一因になっていた。
-            // (c) 直後の captureResultBodyNatural が resultBody 単位で自前にlayoutを
-            // 実行するため、ここでの呼び出しは元々冗長でもあった。よって完全に削除する。
-            // ツリー幅が変わった=resultBodyの自然幅も変わったため、再測定してから再フィットする
-            captureResultBodyNatural("afterSplit");
-            applyResultWindowFit("afterSplit");
-            updateResultScrollRange();
-        } catch (eApply) {}
-    }
-
-    // ---- splitter: マウスドラッグ ----
-    // 【v1.21.0・設計変更】以前は mousemove/mouseup を splitterBar(境界バー)と
-    // resultBody(グループ)の2箇所に仕込んでいたが、ユーザー報告で「ドラッグしても
-    // 一切反応しない」ことが確認された。ScriptUIでは Group/Panel 等のコンテナ要素への
-    // マウスイベントリスナーのサポートが非常に限定的(実質未サポートに近い)という
-    // 既知の制約があり、resultBody(Group)側のリスナーはそもそも発火していなかった
-    // 可能性が高い。一方 Window オブジェクト自体へのイベントリスナーはより確実に
-    // サポートされる傾向があるため、mousemove/mouseup は win(ウィンドウ自体)に
-    // 付け替える。mousedownはドラッグ開始の判定にバー上のクリックで十分なため
-    // 引き続き splitterBar に付ける。win全体のイベントになるため、
-    // splitDragState.active が立っていない時は何もしない(ドラッグ中でない通常の
-    // マウス移動では反応しない)ことを徹底する。
-    var splitDragState = { active: false, startScreenX: 0, startTreeW: 0 };
-    function splitDragMove(ev) {
-        if (!splitDragState.active) return;
-        try {
-            var curX = (ev && ev.screenX !== undefined && ev.screenX !== null) ? ev.screenX : splitDragState.startScreenX;
-            applySplitTreeWidth(splitDragState.startTreeW + (curX - splitDragState.startScreenX));
-        } catch (eSM) {}
-    }
-    safe(function () {
-        splitterBar.addEventListener("mousedown", function (ev) {
-            try {
-                splitDragState.active = true;
-                splitDragState.startScreenX = (ev && ev.screenX !== undefined && ev.screenX !== null) ? ev.screenX : 0;
-                splitDragState.startTreeW = treeContainer.size ? treeContainer.size[0] : treeContainer.preferredSize[0];
-            } catch (eSD) {}
-        });
-        // 【v1.21.0】mousemove/mouseupはwin(ウィンドウ自体)で拾う。
-        // splitDragState.activeがtrueの間だけsplitDragMoveが実際の処理を行うため、
-        // ドラッグ中でない通常のウィンドウ内マウス移動には反応しない。
-        win.addEventListener("mousemove", splitDragMove);
-        win.addEventListener("mouseup", function () { splitDragState.active = false; });
-        return null;
-    }, null);
+    // ---- splitter: 機能削除(v1.22.0) ----
+    // 【v1.22.0・機能削除】項目一覧と検出オブジェクト一覧の境界をドラッグで調整する機能を
+    // v8以降試みてきたが、mousedownをsplitterBarに、mousemove/mouseupをresultBody→win
+    // と付け替えるなど複数の方式を試しても実機(Windows)で一切反応しないままだった。
+    // ScriptUIのイベントサポートが不十分(Group/Panel/Windowいずれでもドラッグ追跡が
+    // 実用的に機能しない)と判断し、ユーザーの明示指示によりドラッグ機能自体を削除した。
+    // splitterBar(境界線)自体は静的な区切り線としてそのまま残す(グレー背景の8px幅の帯、
+    // 見た目の境界としては有用)。幅変更ロジック(applySplitTreeWidth)・ドラッグ状態管理
+    // (splitDragState/splitDragMove)・イベント登録は全て削除済み。
+    // 以後、項目一覧/検出オブジェクト一覧の幅比率は起動時の固定値のみで決まる
+    // (treeContainer.preferredSize.width 等、v1.22.0で調整済み)。
 
     // 【v7】結果画面ボタン列(resultBtnGroup等)は画面最上部に移動済み。
     // 生成・配置はこのブロックの先頭(resultPanel直後)を参照。
@@ -3587,14 +3544,16 @@ function buildAndShowDialog() {
         // 【v1.19.0→v1.20.0】固定高さでは項目ごとの文章量の差で必ずどこかが見切れるため、
         // 表示するテキスト量から必要な高さを都度見積もって設定する
         // (lineHeightPx=24, minLines=2, maxLines=10。v1.20.0で安全マージンを拡大)。
-        var noteEstimatedH = estimateTextBoxHeight(noteFullText, 340, 24, 2, 10);
-        noteText.preferredSize = [340, noteEstimatedH];
+        // 【v1.22.0】幅を340→540へ拡大(detailList等と統一)。boxWidthPxも540に合わせて
+        // 渡すことで、実際のボックス幅に応じた折り返し行数の見積もりになる。
+        var noteEstimatedH = estimateTextBoxHeight(noteFullText, 540, 24, 2, 10);
+        noteText.preferredSize = [540, noteEstimatedH];
         // 【v1.21.0・確定原因により追加】実機ログで、preferredSizeを設定し直しても
         // noteText.sizeが常に[380,80]固定のままだったことが判明した。既に一度レイアウト済みの
         // リーフコントロールは、親コンテナへのlayout.layout(true)だけでは既存の.sizeが
         // 更新されないというScriptUIの既知の癖のため。preferredSizeと同時に.sizeも
         // 直接明示的に上書きする。
-        noteText.size = [340, noteEstimatedH];
+        noteText.size = [540, noteEstimatedH];
         // 高さが変わった分、listContainer/resultBodyの自然サイズも変わるため、
         // 再測定(captureResultBodyNatural)→再フィット→スクロール範囲再計算の順で反映する。
         captureResultBodyNatural("noteTextResize");
@@ -3618,11 +3577,12 @@ function buildAndShowDialog() {
     // (係数はnoteTextと統一: lineHeightPx=24, minLines=2, maxLines=10)。
     function setSelStatusText(msg) {
         selStatusText.text = msg;
-        var statusEstimatedH = estimateTextBoxHeight(msg, 340, 24, 2, 10);
-        selStatusText.preferredSize = [340, statusEstimatedH];
+        // 【v1.22.0】幅を340→540へ拡大(noteText/detailList等と統一)。
+        var statusEstimatedH = estimateTextBoxHeight(msg, 540, 24, 2, 10);
+        selStatusText.preferredSize = [540, statusEstimatedH];
         // 【v1.21.0・確定原因により追加】noteTextと同じ理由でpreferredSizeだけでは
         // 既存の.sizeが更新されないため、.sizeも直接明示的に上書きする。
-        selStatusText.size = [340, statusEstimatedH];
+        selStatusText.size = [540, statusEstimatedH];
         captureResultBodyNatural("selStatusResize");
         applyResultWindowFit("selStatusResize");
         updateResultScrollRange();
