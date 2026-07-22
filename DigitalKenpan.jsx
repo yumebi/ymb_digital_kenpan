@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.19.0";
+var KENPAN_VERSION = "1.20.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -162,25 +162,33 @@ function truncateForProgress(s, maxLen) {
 // どこかの項目が必ず見切れる問題があった。固定値の積み増しではなく、表示する
 // テキスト量から必要な行数・高さをその都度見積もる方式に変える。
 //
+// 【v1.20.0】v1.19.0の係数(lineHeightPx=18, CHAR_WIDTH_PX=14, PADDING_PX=10, maxLines=8)
+// でも実機(Windows)で最終行がわずかに欠ける不具合が再現した。「1行あたりの実際の
+// 描画高さ」の見積もりが実際のフォント描画より小さく、行数が増えるほど誤差が蓄積して
+// いたと考えられるため、安全マージンを大幅に増やす(精度より欠けないことを最優先)。
+//
 // text: 表示するテキスト(改行\nを含んでよい)
 // boxWidthPx: テキストボックスの幅(px)
-// lineHeightPx: 1行あたりの高さ(px、省略時18)
-// minLines/maxLines: 見積もり行数のクランプ範囲(省略時2〜8。maxLinesは暴走防止の上限で、
-//   それを超える長さのテキストでも resultViewport の縦スクロールで最後まで読めるため致命的ではない)
+// lineHeightPx: 1行あたりの高さ(px、省略時24。v1.19.0の18から引き上げ)
+// minLines/maxLines: 見積もり行数のクランプ範囲(省略時2〜10。v1.19.0の8から引き上げ。
+//   maxLinesは暴走防止の上限で、それを超える長さのテキストでも resultViewport の
+//   縦スクロールで最後まで読めるため致命的ではない)
 //
-// 文字幅は日本語(全角)を基準に少し余裕を持たせた値(14px/文字、12pt Bold相当)を使う。
+// 文字幅は日本語(全角)を基準に、v1.19.0の14pxからさらに余裕を持たせた16px/文字を使う
+// (1行あたりの折返し文字数を少なめに見積もることで、行数が多めに出るようにする)。
 // 半角英数字が混じると実際より行数を多めに見積もることになるが、「精度より確実に
 // 切れないこと」を優先する方針のため、多めに確保される分には実害が無いとみなす。
+// 最終的な高さにはさらに+20%のバッファ(HEIGHT_BUFFER_RATIO)を掛ける。
 function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLines) {
     try {
         if (text === undefined || text === null) text = "";
         text = String(text);
         if (!boxWidthPx || boxWidthPx < 20) boxWidthPx = 340;
-        if (!lineHeightPx || lineHeightPx < 8) lineHeightPx = 18;
+        if (!lineHeightPx || lineHeightPx < 8) lineHeightPx = 24;
         if (!minLines || minLines < 1) minLines = 2;
-        if (!maxLines || maxLines < minLines) maxLines = 8;
+        if (!maxLines || maxLines < minLines) maxLines = 10;
 
-        var CHAR_WIDTH_PX = 14; // 全角文字1文字あたりの概算幅(12pt Bold相当、余裕を持たせた値)
+        var CHAR_WIDTH_PX = 16; // 全角文字1文字あたりの概算幅(v1.19.0の14pxからさらに拡大)
         var usableWidthPx = boxWidthPx - 10; // 左右の余白ぶんを差し引く
         if (usableWidthPx < 40) usableWidthPx = 40;
         var charsPerLine = Math.floor(usableWidthPx / CHAR_WIDTH_PX);
@@ -199,11 +207,13 @@ function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLine
         if (totalLines < minLines) totalLines = minLines;
         if (totalLines > maxLines) totalLines = maxLines;
 
-        var PADDING_PX = 10; // 上下の余白相当
-        return Math.ceil(totalLines * lineHeightPx + PADDING_PX);
+        var PADDING_PX = 24; // 上下の余白相当(v1.19.0の10pxから引き上げ)
+        var HEIGHT_BUFFER_RATIO = 1.2; // 【v1.20.0】最終的な高さにさらに+20%のバッファを掛ける
+        var rawHeight = totalLines * lineHeightPx + PADDING_PX;
+        return Math.ceil(rawHeight * HEIGHT_BUFFER_RATIO);
     } catch (eEst) {
         // 見積もりに失敗しても本体機能を壊さないよう、安全側の既定値を返す
-        return (minLines ? minLines : 2) * (lineHeightPx ? lineHeightPx : 18) + 10;
+        return Math.ceil(((minLines ? minLines : 2) * (lineHeightPx ? lineHeightPx : 24) + 24) * 1.2);
     }
 }
 
@@ -3567,28 +3577,45 @@ function buildAndShowDialog() {
         if (r.note) noteParts.push(r.note);
         var noteFullText = joinArr(noteParts, "\n");
         noteText.text = noteFullText;
-        // 【v1.19.0】固定高さでは項目ごとの文章量の差で必ずどこかが見切れるため、
-        // 表示するテキスト量から必要な高さを都度見積もって設定する。
-        noteText.preferredSize = [340, estimateTextBoxHeight(noteFullText, 340, 18, 2, 8)];
+        // 【v1.19.0→v1.20.0】固定高さでは項目ごとの文章量の差で必ずどこかが見切れるため、
+        // 表示するテキスト量から必要な高さを都度見積もって設定する
+        // (lineHeightPx=24, minLines=2, maxLines=10。v1.20.0で安全マージンを拡大)。
+        var noteEstimatedH = estimateTextBoxHeight(noteFullText, 340, 24, 2, 10);
+        noteText.preferredSize = [340, noteEstimatedH];
         // 高さが変わった分、listContainer/resultBodyの自然サイズも変わるため、
         // 再測定(captureResultBodyNatural)→再フィット→スクロール範囲再計算の順で反映する。
         captureResultBodyNatural("noteTextResize");
         applyResultWindowFit("noteTextResize");
         updateResultScrollRange();
+        // 【v1.20.0】次回の係数校正のため、見積もり値と実際に描画された.sizeをログに残す。
+        // これでも欠ける場合、次のログで「見積もり vs 実際」の乖離を正確に把握できる。
+        dlog("NOTE-SIZE", "tree.onChange: 見積もり高さ=" + noteEstimatedH +
+            " 実際のnoteText.size=" + fmtArr(safe(function () { return noteText.size; }, null)) +
+            " 実際のnoteText.bounds=" + fmtArr(safe(function () { return noteText.bounds; }, null)) +
+            " テキスト長=" + noteFullText.length + "文字" +
+            " テキスト内容(先頭50文字)=" + noteFullText.substring(0, 50) + "...");
         for (var i = 0; i < r.details.length; i++) {
             var li = detailList.add("item", r.details[i].text);
             li.itemRef = r.details[i].item;
         }
     };
 
-    // 【v1.19.0】selStatusTextも選択結果メッセージの長さが可変(ロック解除の説明文等が
-    // 連結されて長くなることがある)なため、noteTextと同じ動的サイズ見積もりを適用する。
+    // 【v1.19.0→v1.20.0】selStatusTextも選択結果メッセージの長さが可変(ロック解除の説明文等が
+    // 連結されて長くなることがある)なため、noteTextと同じ動的サイズ見積もりを適用する
+    // (係数はnoteTextと統一: lineHeightPx=24, minLines=2, maxLines=10)。
     function setSelStatusText(msg) {
         selStatusText.text = msg;
-        selStatusText.preferredSize = [340, estimateTextBoxHeight(msg, 340, 18, 2, 8)];
+        var statusEstimatedH = estimateTextBoxHeight(msg, 340, 24, 2, 10);
+        selStatusText.preferredSize = [340, statusEstimatedH];
         captureResultBodyNatural("selStatusResize");
         applyResultWindowFit("selStatusResize");
         updateResultScrollRange();
+        // 【v1.20.0】次回の係数校正のため、見積もり値と実際に描画された.sizeをログに残す。
+        dlog("NOTE-SIZE", "setSelStatusText: 見積もり高さ=" + statusEstimatedH +
+            " 実際のselStatusText.size=" + fmtArr(safe(function () { return selStatusText.size; }, null)) +
+            " 実際のselStatusText.bounds=" + fmtArr(safe(function () { return selStatusText.bounds; }, null)) +
+            " テキスト長=" + String(msg).length + "文字" +
+            " テキスト内容(先頭50文字)=" + String(msg).substring(0, 50) + "...");
     }
 
     function jumpToSelectedDetails(silent) {
