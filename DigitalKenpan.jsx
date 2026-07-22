@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.26.0";
+var KENPAN_VERSION = "1.27.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3464,12 +3464,21 @@ function buildAndShowDialog() {
             // 高さ方向のロジック(resultBodyBaseNaturalH等)には一切触れない。
             var RESULT_LIST_MIN_W = 540; // 検出オブジェクト一覧側の最小(固定)幅=これまでの固定値
             var RESULT_LIST_PANEL_PAD = 16; // listContainerパネルの左右余白概算
+            // 【v1.27.0・確定原因への対処】detailList(listbox)は行数が多く内容が入りきらない
+            // とき、ScriptUIが自動で「内蔵の縦スクロールバー」を右端に描画する(幅約16〜20px)。
+            // v1.26.0まではlistColWを利用可能幅いっぱいに割り当てていたため、この内蔵
+            // スクロールバーがdetailListの右端テキスト(座標値やレイヤー名等)に重なって
+            // 隠してしまっていた。detailListの実際の描画幅からこの分を差し引いて確保する。
+            var LISTBOX_SCROLLBAR_RESERVE = 20; // detailListが内部スクロールバーを表示する際に食われる幅の見込み
             var treeW = (treeContainer.size && treeContainer.size[0] > 0) ? treeContainer.size[0] : 260;
             var splitW = (splitterBar.size && splitterBar.size[0] > 0) ? splitterBar.size[0] : 8;
             var bodySpacing = resultBody.spacing || 2;
-            // vpWから項目一覧・境界線・要素間隔・パネル余白を差し引いた残りが、検出オブジェクト
-            // 一覧側に配分できる幅。540未満にはならない(下限クランプ)。
-            var listAvailW = vpW - treeW - splitW - (bodySpacing * 2) - RESULT_LIST_PANEL_PAD;
+            // vpWから項目一覧・境界線・要素間隔・パネル余白・listbox内蔵スクロールバー分を
+            // 差し引いた残りが、検出オブジェクト一覧側(detailList等)に配分できる幅。
+            // 540未満にはならない(下限クランプ)。内蔵スクロールバーが実際には出ない
+            // (行数が少なく全部収まる)場合はこの20pxは単なる余白になるだけで実害はない
+            // (誤って隠れるよりは安全側)。
+            var listAvailW = vpW - treeW - splitW - (bodySpacing * 2) - RESULT_LIST_PANEL_PAD - LISTBOX_SCROLLBAR_RESERVE;
             var listColW = (listAvailW > RESULT_LIST_MIN_W) ? listAvailW : RESULT_LIST_MIN_W;
 
             safe(function () {
@@ -3496,7 +3505,11 @@ function buildAndShowDialog() {
                 return null;
             }, null);
             safe(function () {
-                var lcW = listColW + RESULT_LIST_PANEL_PAD;
+                // 【v1.27.0】listContainer(外枠パネル)は、detailListが内蔵スクロールバー分を
+                // 含めて実際に必要とする幅(listColW + LISTBOX_SCROLLBAR_RESERVE)を包含する
+                // ように広めに確保する。detailList自体はその内側でスクロールバー分の余白を
+                // 保ったまま描画される(listColWのまま)。
+                var lcW = listColW + LISTBOX_SCROLLBAR_RESERVE + RESULT_LIST_PANEL_PAD;
                 listContainer.preferredSize.width = lcW;
                 if (listContainer.size) listContainer.size = [lcW, listContainer.size[1]];
                 return null;
@@ -3508,7 +3521,10 @@ function buildAndShowDialog() {
             // それ以上になり得る、という区別を保つ(自然幅キャッシュ=最小保証値、
             // 実際の描画幅=それ以上にもなり得る、という設計)。
             safe(function () {
-                var effectiveBodyW = treeW + splitW + (bodySpacing * 2) + listColW + RESULT_LIST_PANEL_PAD;
+                // 【v1.27.0】listContainerがLISTBOX_SCROLLBAR_RESERVE分広めになった分、
+                // resultBody全体の実効幅にも同じ分を反映し、右にはみ出さないようにする。
+                var effectiveBodyW = treeW + splitW + (bodySpacing * 2) + listColW +
+                    LISTBOX_SCROLLBAR_RESERVE + RESULT_LIST_PANEL_PAD;
                 var bw = (resultBodyNaturalW > 0) ? resultBodyNaturalW : resultBody.size[0];
                 if (effectiveBodyW > bw) bw = effectiveBodyW;
                 var bh = (resultBodyNaturalH > 0) ? resultBodyNaturalH : resultBody.size[1];
