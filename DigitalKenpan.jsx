@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.31.0";
+var KENPAN_VERSION = "1.32.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -1777,12 +1777,18 @@ CHECKS.image_colormode = function (doc, cfg, ctx) {
             throwIfAborted(); // 画像1ファイルごとに中断(ESC)を確認
             var file = safe(function () { return item.file; }, null);
             if (!file || !file.exists) continue; // リンク切れは別チェックで報告
+            // 【v1.32.0・確定原因への対処】rawNameをIIFEの外側(ループ本体)で宣言する。
+            // 以前はIIFE内のvarに閉じていたため、下のdetailItemテキスト(結果一覧に表示する
+            // 文字列)側からは参照できず、そちらだけURIエンコードされたfile.nameの生値を
+            // そのまま使ってしまっていた(Macで「ファイル名が文字化けして見える」不具合の
+            // 確定原因。進捗ラベル表示側はv1.12.0で既にrawName経由のdecodeURI対応済みだった)。
+            var rawName = "";
             (function () {
                 // 【Mac確定原因・診断ログで実証済み】file.displayNameがMacで空文字列を
                 // 返すことがあった(ScriptUI表示側の問題ではなくデータ取得の問題だった)。
                 // displayNameが空ならFile標準プロパティのnameへ、それも空ならfsName
                 // (フルパス)へ、と段階的にフォールバックする。
-                var rawName = safe(function () { return file.displayName; }, "");
+                rawName = safe(function () { return file.displayName; }, "");
                 // 【v1.12.0】file.name はExtendScript仕様でURIエンコードされた名前を返す
                 // (日本語ファイル名だと %E3%81%82... のような%表記=「文字化けのよう」に
                 // 見えていた正体)。decodeURIで復号する(不正シーケンスで例外の場合はsafeが吸収)。
@@ -1795,10 +1801,12 @@ CHECKS.image_colormode = function (doc, cfg, ctx) {
             var info = getImageInfoCached(file);
             if (!info.ok || info.colorMode === "UNKNOWN") {
                 warnCount++;
-                details.push(detailItem("カラーモード判定不能(要確認): " + describeItem(rec, doc) + " / ファイル:" + file.name, item));
+                // 【v1.32.0】file.name(URIエンコード生値)→rawName(decodeURI済み・結果一覧は
+                // 短縮しないフルネーム)に変更。
+                details.push(detailItem("カラーモード判定不能(要確認): " + describeItem(rec, doc) + " / ファイル:" + rawName, item));
             } else if (info.colorMode === "RGB") {
                 ngCount++;
-                details.push(detailItem("リンク画像がRGB(" + info.format + "): " + describeItem(rec, doc) + " / ファイル:" + file.name, item));
+                details.push(detailItem("リンク画像がRGB(" + info.format + "): " + describeItem(rec, doc) + " / ファイル:" + rawName, item));
             }
         }
     }
@@ -1827,10 +1835,13 @@ CHECKS.image_resolution = function (doc, cfg, ctx) {
             throwIfAborted(); // 画像1ファイルごとに中断(ESC)を確認
             var file = safe(function () { return item.file; }, null);
             if (!file || !file.exists) continue;
+            // 【v1.32.0・確定原因への対処】rawName2をIIFEの外側(ループ本体)で宣言する。
+            // 理由はimage_colormode関数側のrawNameと同じ(下記コメント参照)。
+            var rawName2 = "";
             (function () {
                 // 【Mac確定原因】上のカラーモード判定中と同様、displayName -> name -> fsName の
                 // 順でフォールバックする(displayNameがMacで空文字列を返すことがあったため)。
-                var rawName2 = safe(function () { return file.displayName; }, "");
+                rawName2 = safe(function () { return file.displayName; }, "");
                 // 【v1.12.0】file.nameのURIエンコード対策(上のカラーモード判定中と同じ)
                 if (!rawName2) rawName2 = safe(function () { return decodeURI(file.name); }, "");
                 if (!rawName2) rawName2 = safe(function () { return file.fsName; }, "");
@@ -1841,7 +1852,9 @@ CHECKS.image_resolution = function (doc, cfg, ctx) {
             var info = getImageInfoCached(file);
             if (!info.ok) {
                 warnCount++;
-                details.push(detailItem("実効解像度 判定不能(ファイルヘッダからピクセル数を取得できません): " + describeItem(rec, doc) + " / ファイル:" + file.name, item));
+                // 【v1.32.0】file.name(URIエンコード生値)→rawName2(decodeURI済み・結果一覧は
+                // 短縮しないフルネーム)に変更。
+                details.push(detailItem("実効解像度 判定不能(ファイルヘッダからピクセル数を取得できません): " + describeItem(rec, doc) + " / ファイル:" + rawName2, item));
                 continue;
             }
             var pdpi = calcPlacedEffectiveDPI(item, info.width, info.height);
@@ -1856,10 +1869,10 @@ CHECKS.image_resolution = function (doc, cfg, ctx) {
             var maxDPI = isBitmap ? cfg.maxBitmapDPI : cfg.maxImageDPI;
             if (pdpi < minDPI) {
                 ngCount++;
-                details.push(detailItem("実効解像度不足[" + typeLabel + "](" + fmt(pdpi, 0) + "dpi < " + minDPI + "dpi) / ファイル:" + file.name + ": " + describeItem(rec, doc), item));
+                details.push(detailItem("実効解像度不足[" + typeLabel + "](" + fmt(pdpi, 0) + "dpi < " + minDPI + "dpi) / ファイル:" + rawName2 + ": " + describeItem(rec, doc), item));
             } else if (maxDPI > 0 && pdpi > maxDPI) {
                 warnCount++;
-                details.push(detailItem("過剰解像度[" + typeLabel + "](" + fmt(pdpi, 0) + "dpi > " + maxDPI + "dpi、データ容量の無駄) / ファイル:" + file.name + ": " + describeItem(rec, doc), item));
+                details.push(detailItem("過剰解像度[" + typeLabel + "](" + fmt(pdpi, 0) + "dpi > " + maxDPI + "dpi、データ容量の無駄) / ファイル:" + rawName2 + ": " + describeItem(rec, doc), item));
             }
         }
     }
