@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.18.0";
+var KENPAN_VERSION = "1.19.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -154,6 +154,57 @@ function truncateForProgress(s, maxLen) {
     if (tailLen > maxLen - 2) tailLen = Math.floor((maxLen - 1) / 2);
     var headLen = maxLen - 1 - tailLen;
     return s.substring(0, headLen) + "…" + s.substring(s.length - tailLen);
+}
+
+// 【v1.19.0】結果画面の noteText/selStatusText 等、multiline:true な statictext は
+// 固定preferredSizeだと項目ごとの文章量の差(1文で終わるものもあれば、リッチブラック/
+// 4Cブラックのように「原因と対応」+「判定基準」の2〜3文にわたるものもある)で
+// どこかの項目が必ず見切れる問題があった。固定値の積み増しではなく、表示する
+// テキスト量から必要な行数・高さをその都度見積もる方式に変える。
+//
+// text: 表示するテキスト(改行\nを含んでよい)
+// boxWidthPx: テキストボックスの幅(px)
+// lineHeightPx: 1行あたりの高さ(px、省略時18)
+// minLines/maxLines: 見積もり行数のクランプ範囲(省略時2〜8。maxLinesは暴走防止の上限で、
+//   それを超える長さのテキストでも resultViewport の縦スクロールで最後まで読めるため致命的ではない)
+//
+// 文字幅は日本語(全角)を基準に少し余裕を持たせた値(14px/文字、12pt Bold相当)を使う。
+// 半角英数字が混じると実際より行数を多めに見積もることになるが、「精度より確実に
+// 切れないこと」を優先する方針のため、多めに確保される分には実害が無いとみなす。
+function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLines) {
+    try {
+        if (text === undefined || text === null) text = "";
+        text = String(text);
+        if (!boxWidthPx || boxWidthPx < 20) boxWidthPx = 340;
+        if (!lineHeightPx || lineHeightPx < 8) lineHeightPx = 18;
+        if (!minLines || minLines < 1) minLines = 2;
+        if (!maxLines || maxLines < minLines) maxLines = 8;
+
+        var CHAR_WIDTH_PX = 14; // 全角文字1文字あたりの概算幅(12pt Bold相当、余裕を持たせた値)
+        var usableWidthPx = boxWidthPx - 10; // 左右の余白ぶんを差し引く
+        if (usableWidthPx < 40) usableWidthPx = 40;
+        var charsPerLine = Math.floor(usableWidthPx / CHAR_WIDTH_PX);
+        if (charsPerLine < 5) charsPerLine = 5;
+
+        // 明示的な改行(\n、複数の文をjoinArrで連結している場合に入る)ごとに
+        // 折り返し行数を積算する
+        var rawLines = text.split("\n");
+        var totalLines = 0;
+        for (var i = 0; i < rawLines.length; i++) {
+            var lineLen = rawLines[i].length;
+            var wrapped = Math.ceil(lineLen / charsPerLine);
+            if (wrapped < 1) wrapped = 1; // 空行でも1行ぶんは確保
+            totalLines += wrapped;
+        }
+        if (totalLines < minLines) totalLines = minLines;
+        if (totalLines > maxLines) totalLines = maxLines;
+
+        var PADDING_PX = 10; // 上下の余白相当
+        return Math.ceil(totalLines * lineHeightPx + PADDING_PX);
+    } catch (eEst) {
+        // 見積もりに失敗しても本体機能を壊さないよう、安全側の既定値を返す
+        return (minLines ? minLines : 2) * (lineHeightPx ? lineHeightPx : 18) + 10;
+    }
 }
 
 // 数値を指定桁数で丸めて文字列化(ES3セーフ。toFixedはExtendScriptでも利用可)
@@ -3514,12 +3565,31 @@ function buildAndShowDialog() {
         var noteParts = [];
         if (r.advice && r.status !== "OK" && r.status !== "SKIP") noteParts.push("【原因と対応】" + r.advice);
         if (r.note) noteParts.push(r.note);
-        noteText.text = joinArr(noteParts, "\n");
+        var noteFullText = joinArr(noteParts, "\n");
+        noteText.text = noteFullText;
+        // 【v1.19.0】固定高さでは項目ごとの文章量の差で必ずどこかが見切れるため、
+        // 表示するテキスト量から必要な高さを都度見積もって設定する。
+        noteText.preferredSize = [340, estimateTextBoxHeight(noteFullText, 340, 18, 2, 8)];
+        // 高さが変わった分、listContainer/resultBodyの自然サイズも変わるため、
+        // 再測定(captureResultBodyNatural)→再フィット→スクロール範囲再計算の順で反映する。
+        captureResultBodyNatural("noteTextResize");
+        applyResultWindowFit("noteTextResize");
+        updateResultScrollRange();
         for (var i = 0; i < r.details.length; i++) {
             var li = detailList.add("item", r.details[i].text);
             li.itemRef = r.details[i].item;
         }
     };
+
+    // 【v1.19.0】selStatusTextも選択結果メッセージの長さが可変(ロック解除の説明文等が
+    // 連結されて長くなることがある)なため、noteTextと同じ動的サイズ見積もりを適用する。
+    function setSelStatusText(msg) {
+        selStatusText.text = msg;
+        selStatusText.preferredSize = [340, estimateTextBoxHeight(msg, 340, 18, 2, 8)];
+        captureResultBodyNatural("selStatusResize");
+        applyResultWindowFit("selStatusResize");
+        updateResultScrollRange();
+    }
 
     function jumpToSelectedDetails(silent) {
         var sels = detailList.selection;
@@ -3531,14 +3601,14 @@ function buildAndShowDialog() {
             if (sels.itemRef) arr.push(sels.itemRef);
         }
         if (arr.length === 0) {
-            selStatusText.text = "この行にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。";
+            setSelStatusText("この行にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
             if (!silent) alert("選択した項目にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
             return;
         }
         var rep = selectAndZoom(doc, arr);
         var statusMsg = rep.count > 0 ? (rep.count + "件を選択しました。") : "選択できませんでした。";
         if (rep.message) statusMsg += "\n" + rep.message;
-        selStatusText.text = statusMsg;
+        setSelStatusText(statusMsg);
     }
 
     selectBtn.onClick = function () { jumpToSelectedDetails(false); };
