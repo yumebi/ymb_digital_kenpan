@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.23.0";
+var KENPAN_VERSION = "1.24.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3217,6 +3217,14 @@ function buildAndShowDialog() {
     // 自前で加算することで補正する(レイアウトエンジンの集計に頼らない)。
     var lastAppliedNoteH = 80;   // noteTextの初期preferredSize高さ(3284行付近)と同じ値
     var lastAppliedStatusH = 90; // selStatusTextの初期preferredSize高さ(3305行付近)と同じ値
+    // 【v1.24.0・確定原因への対処】v1.23.0のresultBodyNaturalH計算は「前回このリロで
+    // resultBody.minimumSize/maximumSizeに書き込んだ値」を次の計算の入力にしてしまっており、
+    // 呼ぶたびに際限なく積み上がる累積増加バグがあった(win.onResize再入ループ v1.16〜v1.17と
+    // 同根の「前回の出力を次の入力にしてしまう」パターン)。対処として、「delta=0のときの
+    // 土台となる自然サイズ」を結果画面の表示・再表示ごとに1回だけキャッシュし、以降は必ず
+    // このキャッシュ値のみを起点に計算する(前回のnaturalHを一切参照しない)。
+    var resultBodyBaseNaturalH = 0; // 土台となる自然高さ(delta=0のときの値。showResultsで再キャッシュ)
+    var resultBodyBaseNaturalW = 0; // 土台となる自然幅(幅は動的変化がないためそのまま使い回す)
 
     var resultBody = resultViewport.add("group");
     resultBody.orientation = "row";
@@ -3332,35 +3340,52 @@ function buildAndShowDialog() {
             // 確認された。自然サイズの測定にはresultBody自身のlayoutで十分なので、
             // winではなくresultBodyを対象にする。
             safeWinLayout(resultBody);
-            resultBodyNaturalW = resultBody.size[0];
-            resultBodyNaturalH = resultBody.size[1];
-            if (!resultBodyNaturalW || resultBodyNaturalW < 10) {
-                resultBodyNaturalW = resultBody.preferredSize ? resultBody.preferredSize[0] : 0;
+            var measuredW = resultBody.size[0];
+            var measuredH = resultBody.size[1];
+            if (!measuredW || measuredW < 10) {
+                measuredW = resultBody.preferredSize ? resultBody.preferredSize[0] : 0;
             }
-            if (!resultBodyNaturalH || resultBodyNaturalH < 10) {
-                resultBodyNaturalH = resultBody.preferredSize ? resultBody.preferredSize[1] : 0;
+            if (!measuredH || measuredH < 10) {
+                measuredH = resultBody.preferredSize ? resultBody.preferredSize[1] : 0;
             }
-            // 【v1.23.0・確定原因への対処】noteText/selStatusTextへの直接.size代入(v1.21.0)は
-            // 個別コントロール自身の描画には反映されるが、上のsafeWinLayout(resultBody)による
-            // 「親の必要サイズ計算」には反映されない(ScriptUIレイアウトエンジンの既知の癖)。
-            // そのため resultBodyNaturalH は常に construction時の初期値(noteText=80px,
-            // selStatusText=90px)ベースの値のまま固定されていた。直近に実際へ適用した高さ
-            // (lastAppliedNoteH/lastAppliedStatusH)と初期値との差分を自前で加算して補正する。
-            // baseとなるresultBody.size[1]自体はレイアウトエンジンの構成時計算(不変)なので、
-            // 差分は毎回ゼロから計算し直しており、繰り返し呼んでも積み上がらない(冪等)。
+            // 【v1.23.0・確定原因への対処→v1.24.0・累積増加バグの確定原因への再対処】
+            // noteText/selStatusTextへの直接.size代入(v1.21.0)は個別コントロール自身の
+            // 描画には反映されるが、上のsafeWinLayout(resultBody)による「親の必要サイズ計算」
+            // には反映されない(ScriptUIレイアウトエンジンの既知の癖)。v1.23.0では
+            // resultBody.size[1]を都度測り直して差分加算する方式にしたが、実機ログで
+            // 「measuredH自体が、前回この関数がresultBody.minimumSize/maximumSizeへ書き込んだ
+            // 値(=前回の既に膨張済みのnaturalH)をそのまま読み返しているだけ」であることが
+            // 判明した。そこへ今回のdeltaをさらに加算するため、呼ぶたびに際限なく積み上がる
+            // (win.onResize再入ループ v1.16〜v1.17と同根の「前回の出力を次の入力にしてしまう」
+            // パターン)。
+            //
+            // 対処: 「delta=0のときの土台となる自然高さ(resultBodyBaseNaturalH)」を結果画面の
+            // 表示・再表示ごとに1回だけ(sourceTag==="showResults"のときだけ)キャッシュし、
+            // 以降のnoteTextResize/selStatusResize呼び出しでは絶対にmeasuredHを土台として
+            // 使わず、必ずこのキャッシュ値のみを起点に計算する(前回のnaturalHを一切参照しない
+            // 真にゼロからの計算式にすることで、同じdelta値が繰り返し来てもnaturalHが変化しない
+            // ことを構造的に保証する)。
             var noteDelta = lastAppliedNoteH - 80;
             var statusDelta = lastAppliedStatusH - 90;
             if (noteDelta < 0) noteDelta = 0;   // 縮小方向の補正はしない(安全側)
             if (statusDelta < 0) statusDelta = 0;
+            if (tag === "showResults" || !resultBodyBaseNaturalH) {
+                // 土台を(再)キャッシュする。measuredHの時点でのdeltaを逆算して差し引くことで、
+                // 万一noteText/selStatusTextが初期値でない状態で捕捉しても正しい土台値になる。
+                resultBodyBaseNaturalH = measuredH - noteDelta - statusDelta;
+                if (resultBodyBaseNaturalH < 10) resultBodyBaseNaturalH = measuredH; // 異常値時の保険
+                resultBodyBaseNaturalW = measuredW;
+            }
             var RESULT_BODY_SAFETY_MARGIN_PX = 10; // 念のための安全マージン
-            resultBodyNaturalH += noteDelta + statusDelta + RESULT_BODY_SAFETY_MARGIN_PX;
+            resultBodyNaturalW = resultBodyBaseNaturalW;
+            resultBodyNaturalH = resultBodyBaseNaturalH + noteDelta + statusDelta + RESULT_BODY_SAFETY_MARGIN_PX;
             resultBody.minimumSize = [resultBodyNaturalW, resultBodyNaturalH];
             resultBody.maximumSize = [resultBodyNaturalW, resultBodyNaturalH];
             dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] naturalW=" + resultBodyNaturalW +
                 " naturalH=" + resultBodyNaturalH +
-                " (noteDelta=" + noteDelta + " statusDelta=" + statusDelta +
+                " (base=" + resultBodyBaseNaturalH + " noteDelta=" + noteDelta + " statusDelta=" + statusDelta +
                 " lastAppliedNoteH=" + lastAppliedNoteH + " lastAppliedStatusH=" + lastAppliedStatusH + ")" +
-                " win.size=" + fmtArr(win.size));
+                " measuredH=" + measuredH + " win.size=" + fmtArr(win.size));
         } catch (eCapR) {
             dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] 例外発生: " + eCapR.toString());
         }
