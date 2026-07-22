@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.29.0";
+var KENPAN_VERSION = "1.30.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -179,7 +179,14 @@ function truncateForProgress(s, maxLen) {
 // 半角英数字が混じると実際より行数を多めに見積もることになるが、「精度より確実に
 // 切れないこと」を優先する方針のため、多めに確保される分には実害が無いとみなす。
 // 最終的な高さにはさらに+20%のバッファ(HEIGHT_BUFFER_RATIO)を掛ける。
-function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLines) {
+//
+// paddingPx/bufferRatio: 【v1.30.0で追加】上下余白・安全バッファ倍率を呼び出し側で
+// 調整できるようにした引数(省略時はそれぞれ24px/1.2倍=これまでどおりのnoteText向け
+// 安全マージン。既存呼び出し元(noteText)への影響は無い)。selStatusTextのような
+// 「通常は短い1〜2文」の欄では、この余白/バッファをより控えめな値に指定することで、
+// 短文時に箱だけが大きく残って文字が上寄りに偏って見える(結果として説明欄との間に
+// 大きな空白があるように見える)問題を軽減できる。
+function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLines, paddingPx, bufferRatio) {
     try {
         if (text === undefined || text === null) text = "";
         text = String(text);
@@ -187,6 +194,8 @@ function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLine
         if (!lineHeightPx || lineHeightPx < 8) lineHeightPx = 24;
         if (!minLines || minLines < 1) minLines = 2;
         if (!maxLines || maxLines < minLines) maxLines = 10;
+        if (paddingPx === undefined || paddingPx === null || paddingPx < 0) paddingPx = 24;
+        if (!bufferRatio || bufferRatio < 1) bufferRatio = 1.2;
 
         var CHAR_WIDTH_PX = 16; // 全角文字1文字あたりの概算幅(v1.19.0の14pxからさらに拡大)
         var usableWidthPx = boxWidthPx - 10; // 左右の余白ぶんを差し引く
@@ -207,13 +216,15 @@ function estimateTextBoxHeight(text, boxWidthPx, lineHeightPx, minLines, maxLine
         if (totalLines < minLines) totalLines = minLines;
         if (totalLines > maxLines) totalLines = maxLines;
 
-        var PADDING_PX = 24; // 上下の余白相当(v1.19.0の10pxから引き上げ)
-        var HEIGHT_BUFFER_RATIO = 1.2; // 【v1.20.0】最終的な高さにさらに+20%のバッファを掛ける
+        var PADDING_PX = paddingPx; // 上下の余白相当(v1.19.0の10pxから引き上げ。v1.30.0で引数化)
+        var HEIGHT_BUFFER_RATIO = bufferRatio; // 【v1.20.0】最終的な高さにさらにバッファを掛ける(v1.30.0で引数化)
         var rawHeight = totalLines * lineHeightPx + PADDING_PX;
         return Math.ceil(rawHeight * HEIGHT_BUFFER_RATIO);
     } catch (eEst) {
         // 見積もりに失敗しても本体機能を壊さないよう、安全側の既定値を返す
-        return Math.ceil(((minLines ? minLines : 2) * (lineHeightPx ? lineHeightPx : 24) + 24) * 1.2);
+        var fbPad = (paddingPx === undefined || paddingPx === null || paddingPx < 0) ? 24 : paddingPx;
+        var fbRatio = (bufferRatio && bufferRatio >= 1) ? bufferRatio : 1.2;
+        return Math.ceil(((minLines ? minLines : 2) * (lineHeightPx ? lineHeightPx : 24) + fbPad) * fbRatio);
     }
 }
 
@@ -3727,11 +3738,24 @@ function buildAndShowDialog() {
 
     // 【v1.19.0→v1.20.0】selStatusTextも選択結果メッセージの長さが可変(ロック解除の説明文等が
     // 連結されて長くなることがある)なため、noteTextと同じ動的サイズ見積もりを適用する
-    // (係数はnoteTextと統一: lineHeightPx=24, minLines=2, maxLines=10)。
+    // (行数見積もり自体の係数はnoteTextと統一: lineHeightPx=24, maxLines=10。
+    // 【v1.30.0】minLines/余白/バッファのみnoteTextより控えめに変更、詳細は下記コメント参照)。
     function setSelStatusText(msg) {
         selStatusText.text = msg;
         // 【v1.22.0】幅を340→540へ拡大(noteText/detailList等と統一)。
-        var statusEstimatedH = estimateTextBoxHeight(msg, 540, 24, 2, 10);
+        // 【v1.30.0・確定原因への対処】実機ログで、典型的な短いメッセージ(例:
+        // 「1件を選択しました。」10文字1行)でもminLines=2+PADDING_PX=24+バッファ1.2倍の
+        // noteText同等の安全マージンにより見積もり高さが87pxにもなり、箱の中でテキストが
+        // 上寄りに小さく表示される結果、オレンジの説明文(noteText)との間が大きく空いて
+        // 見える不具合が確定した(箱同士の間隔=listContainer.spacing自体は正しく詰まって
+        // いたため、v1.29.0のspacing縮小だけでは解消しなかった)。
+        // selStatusTextは通常1〜2文程度でnoteTextほど長くならないため、minLinesを2→1に、
+        // 上下余白を24→10px、バッファを1.2倍→1.1倍に控えめにする(noteText側の設計思想・
+        // 数値はv1.19〜v1.20で苦労して直した「文字が欠ける」バグの再発防止のため一切変更
+        // しない)。稀に長くなるロック解除メッセージ等でも、行数見積もり自体(charsPerLine
+        // ベースの折り返し計算)とmaxLines=10は変更していないため、+10%程度の安全マージンは
+        // 保ったまま欠けを防止できる。
+        var statusEstimatedH = estimateTextBoxHeight(msg, 540, 24, 1, 10, 10, 1.1);
         selStatusText.preferredSize = [540, statusEstimatedH];
         // 【v1.21.0・確定原因により追加】noteTextと同じ理由でpreferredSizeだけでは
         // 既存の.sizeが更新されないため、.sizeも直接明示的に上書きする。
