@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.24.0";
+var KENPAN_VERSION = "1.25.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3440,13 +3440,75 @@ function buildAndShowDialog() {
                 return null;
             }, null);
 
-            // resultBodyは自然サイズのまま保持(ビューポートより大きい分ははみ出してクリップされる)
+            // 【v1.25.0】検出オブジェクト一覧(detailList等)の幅追従。
+            // 現状の固定幅540pxを「下限」として維持しつつ、ウィンドウ(=viewport幅)がそれより
+            // 広い場合は余った幅を検出オブジェクト一覧側(listContainer/detailList/
+            // selectBtnGroup/noteText/selStatusText)に配分して拡大する。項目一覧
+            // (treeContainer)側は260px固定のままで変えない(要望どおり可変にするのは
+            // 検出オブジェクト一覧側のみ)。
+            // 【スコープ限定・意図的にシンプルに保つ】v1.16〜v1.17のウィンドウ追従伸縮での
+            // 大トラブル(再入ループ・win.layout.layout(true)のwin.size副作用)やv1.24.0の
+            // resultBodyNaturalH累積バグは、いずれも「高さ」方向かつ「前回の計算結果を次の
+            // 入力にしてしまう」パターンだった。今回は幅方向の単純な下限クランプ
+            // (Math.max(540px, 利用可能幅))であり、毎回vpWという外部から与えられる値のみを
+            // 起点に計算し直す(前回のlistColW等を参照しない)ため、同種の累積は起こらない。
+            // 高さ方向のロジック(resultBodyBaseNaturalH等)には一切触れない。
+            var RESULT_LIST_MIN_W = 540; // 検出オブジェクト一覧側の最小(固定)幅=これまでの固定値
+            var RESULT_LIST_PANEL_PAD = 16; // listContainerパネルの左右余白概算
+            var treeW = (treeContainer.size && treeContainer.size[0] > 0) ? treeContainer.size[0] : 260;
+            var splitW = (splitterBar.size && splitterBar.size[0] > 0) ? splitterBar.size[0] : 8;
+            var bodySpacing = resultBody.spacing || 2;
+            // vpWから項目一覧・境界線・要素間隔・パネル余白を差し引いた残りが、検出オブジェクト
+            // 一覧側に配分できる幅。540未満にはならない(下限クランプ)。
+            var listAvailW = vpW - treeW - splitW - (bodySpacing * 2) - RESULT_LIST_PANEL_PAD;
+            var listColW = (listAvailW > RESULT_LIST_MIN_W) ? listAvailW : RESULT_LIST_MIN_W;
+
             safe(function () {
+                var dlH = detailList.size ? detailList.size[1] : detailList.preferredSize[1];
+                detailList.preferredSize = [listColW, dlH];
+                detailList.size = [listColW, dlH];
+                return null;
+            }, null);
+            safe(function () {
+                selectBtnGroup.preferredSize.width = listColW;
+                if (selectBtnGroup.size) selectBtnGroup.size = [listColW, selectBtnGroup.size[1]];
+                return null;
+            }, null);
+            safe(function () {
+                var ntH = noteText.size ? noteText.size[1] : noteText.preferredSize[1];
+                noteText.preferredSize = [listColW, ntH];
+                noteText.size = [listColW, ntH];
+                return null;
+            }, null);
+            safe(function () {
+                var stH = selStatusText.size ? selStatusText.size[1] : selStatusText.preferredSize[1];
+                selStatusText.preferredSize = [listColW, stH];
+                selStatusText.size = [listColW, stH];
+                return null;
+            }, null);
+            safe(function () {
+                var lcW = listColW + RESULT_LIST_PANEL_PAD;
+                listContainer.preferredSize.width = lcW;
+                if (listContainer.size) listContainer.size = [lcW, listContainer.size[1]];
+                return null;
+            }, null);
+
+            // resultBodyは自然サイズ(の下限)を維持しつつ、検出オブジェクト一覧側が広がった分は
+            // それを上回って拡大してよい。【重要】resultBodyNaturalW自体(v1.24.0導入の
+            // 「最小保証値」キャッシュ)はここでは書き換えない。実際に描画するbwだけが
+            // それ以上になり得る、という区別を保つ(自然幅キャッシュ=最小保証値、
+            // 実際の描画幅=それ以上にもなり得る、という設計)。
+            safe(function () {
+                var effectiveBodyW = treeW + splitW + (bodySpacing * 2) + listColW + RESULT_LIST_PANEL_PAD;
                 var bw = (resultBodyNaturalW > 0) ? resultBodyNaturalW : resultBody.size[0];
+                if (effectiveBodyW > bw) bw = effectiveBodyW;
                 var bh = (resultBodyNaturalH > 0) ? resultBodyNaturalH : resultBody.size[1];
                 resultBody.size = [bw, bh];
                 return null;
             }, null);
+
+            dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] 幅追従: vpW=" + vpW +
+                " treeW=" + treeW + " splitW=" + splitW + " listAvailW=" + listAvailW + " listColW=" + listColW);
 
             dlog("RESULT-FIT", "applyResultWindowFit[" + tag + "] 完了: win=" + fmtArr(win.size) +
                 " availW=" + availW + " availH=" + availH +
