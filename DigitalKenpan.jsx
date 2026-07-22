@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.30.0";
+var KENPAN_VERSION = "1.31.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3689,6 +3689,61 @@ function buildAndShowDialog() {
         }
     }
 
+    // 【v1.31.0・noteTextの高さを実測方式に切替】
+    // これまでのestimateTextBoxHeight()は「文字数→折り返し行数→高さ」を推測するヒューリスティック
+    // であり、v1.19.0の文字欠けを踏まえv1.20.0で安全マージンを+20%まで強化した結果、今度は逆に
+    // 短め〜中程度の文章で箱が過大になり、noteTextの下に不要な余白ができる不具合(v1.30.0の
+    // selStatusText版と同根)が指摘された。過大/過小の綱引きを続けるより、可能な限り実測に
+    // 切り替える。
+    //
+    // 第一候補: ScriptUI組み込みの graphics.measureString(text, font, boundingWidth) で、
+    // OS側のテキストレイアウトエンジンに直接「このフォント・この幅で折り返すと何px必要か」を
+    // 問い合わせる(利用できれば文字数からの推測誤差が構造的に無くなる)。
+    // 【コーディネータ提案からの変更点・理由】提案にあった「大きな高さを一時設定して
+    // listContainerを強制relayoutし、noteText.sizeの縮み方を見る」方式は保険の第二候補として
+    // 実装したが、ScriptUIのlayoutエンジンは基本的に「指定されたpreferredSize/sizeをそのまま
+    // 配置する」ものであり、コンテンツ量から自動的に高さを逆算して縮めてくれる保証が無い
+    // (提案時点でも「機能するかは実機ログで確認」と留保されていた)。measureStringは
+    // ドキュメント上テキスト計測専用のAPIであり、より直接的で信頼できるため第一候補にする。
+    // どちらも失敗した場合のみ、既存のヒューリスティック(v1.19〜v1.20の安全マージンのまま・
+    // 今回は一切変更しない)にフォールバックする(実機での安全側の担保)。
+    function measureNoteTextHeight(text, boxWidthPx, fallbackH) {
+        var PAD = 12; // 上下余白の概算(measureStringは文字の描画範囲だけを返すため)
+        var result = { h: fallbackH, method: "heuristic-fallback" };
+        // 第一候補: graphics.measureString
+        var measuredByString = 0;
+        var ok1 = safe(function () {
+            var dim = noteText.graphics.measureString(text, noteText.graphics.font, boxWidthPx - 10);
+            if (dim && dim.length >= 2 && dim[1] > 0) { measuredByString = dim[1]; return true; }
+            return false;
+        }, false);
+        if (ok1 && measuredByString > 5) {
+            var h1 = Math.ceil((measuredByString + PAD) * 1.1); // +10%の安全マージン
+            result = { h: h1, method: "measureString", raw: measuredByString };
+            dlog("NOTE-SIZE", "measureNoteTextHeight: measureString成功 raw=" + measuredByString + " -> h=" + h1);
+            return result;
+        }
+        // 第二候補: 大きめの高さを一時設定→listContainerを強制relayout→縮むか確認
+        var probeH = 1000;
+        var afterH = 0;
+        safe(function () {
+            noteText.preferredSize = [boxWidthPx, probeH];
+            noteText.size = [boxWidthPx, probeH];
+            safeWinLayout(listContainer);
+            afterH = noteText.size ? noteText.size[1] : 0;
+            return null;
+        }, null);
+        if (afterH > 5 && afterH < probeH - 5) {
+            var h2 = Math.ceil(afterH * 1.1) + 8;
+            result = { h: h2, method: "resize-relayout", raw: afterH };
+            dlog("NOTE-SIZE", "measureNoteTextHeight: resize-relayout成功 raw=" + afterH + " -> h=" + h2);
+            return result;
+        }
+        dlog("NOTE-SIZE", "measureNoteTextHeight: 実測いずれも失敗のためヒューリスティックにフォールバック" +
+            "(measureString戻り値=" + measuredByString + " resize-relayout戻り値=" + afterH + ")");
+        return result;
+    }
+
     tree.onChange = function () {
         detailList.removeAll();
         noteText.text = "";
@@ -3706,7 +3761,13 @@ function buildAndShowDialog() {
         // (lineHeightPx=24, minLines=2, maxLines=10。v1.20.0で安全マージンを拡大)。
         // 【v1.22.0】幅を340→540へ拡大(detailList等と統一)。boxWidthPxも540に合わせて
         // 渡すことで、実際のボックス幅に応じた折り返し行数の見積もりになる。
-        var noteEstimatedH = estimateTextBoxHeight(noteFullText, 540, 24, 2, 10);
+        // 【v1.31.0】ヒューリスティック(estimateTextBoxHeight)による推測をやめ、
+        // measureNoteTextHeight()による実測方式に切り替える(詳細は同関数のコメント参照)。
+        // ヒューリスティック値は実測がいずれも失敗した場合のフォールバックとしてそのまま残す
+        // (v1.19〜v1.20の安全マージンは一切変更しない)。
+        var noteHeuristicH = estimateTextBoxHeight(noteFullText, 540, 24, 2, 10);
+        var noteMeasureResult = measureNoteTextHeight(noteFullText, 540, noteHeuristicH);
+        var noteEstimatedH = noteMeasureResult.h;
         noteText.preferredSize = [540, noteEstimatedH];
         // 【v1.21.0・確定原因により追加】実機ログで、preferredSizeを設定し直しても
         // noteText.sizeが常に[380,80]固定のままだったことが判明した。既に一度レイアウト済みの
@@ -3725,7 +3786,8 @@ function buildAndShowDialog() {
         updateResultScrollRange();
         // 【v1.20.0】次回の係数校正のため、見積もり値と実際に描画された.sizeをログに残す。
         // これでも欠ける場合、次のログで「見積もり vs 実際」の乖離を正確に把握できる。
-        dlog("NOTE-SIZE", "tree.onChange: 見積もり高さ=" + noteEstimatedH +
+        dlog("NOTE-SIZE", "tree.onChange: 採用方式=" + noteMeasureResult.method +
+            " 見積もり高さ=" + noteEstimatedH + " (参考:旧ヒューリスティック値=" + noteHeuristicH + ")" +
             " 実際のnoteText.size=" + fmtArr(safe(function () { return noteText.size; }, null)) +
             " 実際のnoteText.bounds=" + fmtArr(safe(function () { return noteText.bounds; }, null)) +
             " テキスト長=" + noteFullText.length + "文字" +
