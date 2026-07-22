@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.25.0";
+var KENPAN_VERSION = "1.26.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3379,8 +3379,17 @@ function buildAndShowDialog() {
             var RESULT_BODY_SAFETY_MARGIN_PX = 10; // 念のための安全マージン
             resultBodyNaturalW = resultBodyBaseNaturalW;
             resultBodyNaturalH = resultBodyBaseNaturalH + noteDelta + statusDelta + RESULT_BODY_SAFETY_MARGIN_PX;
-            resultBody.minimumSize = [resultBodyNaturalW, resultBodyNaturalH];
-            resultBody.maximumSize = [resultBodyNaturalW, resultBodyNaturalH];
+            // 【v1.26.0・確定原因への対処】ここまでの min=max=resultBodyNaturalW という
+            // 「幅も完全固定」の指定が、v1.25.0で追加した幅追従ロジック(applyResultWindowFit
+            // 内でresultBodyNaturalWより大きいbwを.sizeに設定しようとする処理)を
+            // maximumSizeによって強制的にクランプし戻してしまっていた(detailList等の内側は
+            // 広がったつもりでも、外枠resultBody自体が広がれず、右側・下部に空白/内容の
+            // 見切れが発生)。幅の上限のみ緩め、幅は自由に拡大できるようにする
+            // (高さ方向は引き続きmin=max=resultBodyNaturalHで完全固定のまま、
+            // v1.24.0で解決した累積バグ防止のための「高さは自然サイズに固定」という
+            // 設計方針には一切手を入れない)。
+            resultBody.minimumSize = [resultBodyNaturalW, resultBodyNaturalH]; // 最小保証値はそのまま(高さ・幅とも)
+            resultBody.maximumSize = [100000, resultBodyNaturalH]; // 幅の上限は撤廃(高さの上限はこれまで通り固定)
             dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] naturalW=" + resultBodyNaturalW +
                 " naturalH=" + resultBodyNaturalH +
                 " (base=" + resultBodyBaseNaturalH + " noteDelta=" + noteDelta + " statusDelta=" + statusDelta +
