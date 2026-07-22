@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.22.0";
+var KENPAN_VERSION = "1.23.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3208,6 +3208,15 @@ function buildAndShowDialog() {
     var resultHScrollbarLastEnabled = null;  // 横スクロールバーのenabled変化追跡
     var resultBodyNaturalW = 0;              // resultBodyの自然幅(初回実測・splitterドラッグ後に再測定)
     var resultBodyNaturalH = 0;              // resultBodyの自然高
+    // 【v1.23.0・確定原因への対処】noteText/selStatusTextへの直接.size代入(v1.21.0)は
+    // 個別コントロール自身の描画には反映されるが、ScriptUIレイアウトエンジンの
+    // 「親(resultBody)の必要サイズ計算」には反映されないという既知の癖があり、
+    // captureResultBodyNatural()が測る resultBody.size[1] が常に初期値(noteText=80px,
+    // selStatusText=90px時点の値)のまま固定されてしまっていた。そこで、直近に
+    // 実際に適用した高さを記録しておき、初期値との差分をresultBody.size[1]に
+    // 自前で加算することで補正する(レイアウトエンジンの集計に頼らない)。
+    var lastAppliedNoteH = 80;   // noteTextの初期preferredSize高さ(3284行付近)と同じ値
+    var lastAppliedStatusH = 90; // selStatusTextの初期preferredSize高さ(3305行付近)と同じ値
 
     var resultBody = resultViewport.add("group");
     resultBody.orientation = "row";
@@ -3331,10 +3340,27 @@ function buildAndShowDialog() {
             if (!resultBodyNaturalH || resultBodyNaturalH < 10) {
                 resultBodyNaturalH = resultBody.preferredSize ? resultBody.preferredSize[1] : 0;
             }
+            // 【v1.23.0・確定原因への対処】noteText/selStatusTextへの直接.size代入(v1.21.0)は
+            // 個別コントロール自身の描画には反映されるが、上のsafeWinLayout(resultBody)による
+            // 「親の必要サイズ計算」には反映されない(ScriptUIレイアウトエンジンの既知の癖)。
+            // そのため resultBodyNaturalH は常に construction時の初期値(noteText=80px,
+            // selStatusText=90px)ベースの値のまま固定されていた。直近に実際へ適用した高さ
+            // (lastAppliedNoteH/lastAppliedStatusH)と初期値との差分を自前で加算して補正する。
+            // baseとなるresultBody.size[1]自体はレイアウトエンジンの構成時計算(不変)なので、
+            // 差分は毎回ゼロから計算し直しており、繰り返し呼んでも積み上がらない(冪等)。
+            var noteDelta = lastAppliedNoteH - 80;
+            var statusDelta = lastAppliedStatusH - 90;
+            if (noteDelta < 0) noteDelta = 0;   // 縮小方向の補正はしない(安全側)
+            if (statusDelta < 0) statusDelta = 0;
+            var RESULT_BODY_SAFETY_MARGIN_PX = 10; // 念のための安全マージン
+            resultBodyNaturalH += noteDelta + statusDelta + RESULT_BODY_SAFETY_MARGIN_PX;
             resultBody.minimumSize = [resultBodyNaturalW, resultBodyNaturalH];
             resultBody.maximumSize = [resultBodyNaturalW, resultBodyNaturalH];
             dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] naturalW=" + resultBodyNaturalW +
-                " naturalH=" + resultBodyNaturalH + " win.size=" + fmtArr(win.size));
+                " naturalH=" + resultBodyNaturalH +
+                " (noteDelta=" + noteDelta + " statusDelta=" + statusDelta +
+                " lastAppliedNoteH=" + lastAppliedNoteH + " lastAppliedStatusH=" + lastAppliedStatusH + ")" +
+                " win.size=" + fmtArr(win.size));
         } catch (eCapR) {
             dlog("RESULT-FIT", "captureResultBodyNatural[" + tag + "] 例外発生: " + eCapR.toString());
         }
@@ -3554,6 +3580,10 @@ function buildAndShowDialog() {
         // 更新されないというScriptUIの既知の癖のため。preferredSizeと同時に.sizeも
         // 直接明示的に上書きする。
         noteText.size = [540, noteEstimatedH];
+        // 【v1.23.0】captureResultBodyNatural()側でresultBodyの必要高さを差分補正するために、
+        // 直近に実際へ適用した高さを記録しておく(親コンテナの必要サイズ計算にはこの.size代入
+        // 自体が反映されないため、自前の差分計算で補う)。
+        lastAppliedNoteH = noteEstimatedH;
         // 高さが変わった分、listContainer/resultBodyの自然サイズも変わるため、
         // 再測定(captureResultBodyNatural)→再フィット→スクロール範囲再計算の順で反映する。
         captureResultBodyNatural("noteTextResize");
@@ -3583,6 +3613,8 @@ function buildAndShowDialog() {
         // 【v1.21.0・確定原因により追加】noteTextと同じ理由でpreferredSizeだけでは
         // 既存の.sizeが更新されないため、.sizeも直接明示的に上書きする。
         selStatusText.size = [540, statusEstimatedH];
+        // 【v1.23.0】noteTextと同様、resultBody側の差分補正用に直近適用高さを記録する。
+        lastAppliedStatusH = statusEstimatedH;
         captureResultBodyNatural("selStatusResize");
         applyResultWindowFit("selStatusResize");
         updateResultScrollRange();
