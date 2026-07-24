@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.36.0";
+var KENPAN_VERSION = "1.37.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3773,16 +3773,6 @@ function buildAndShowDialog() {
         return result;
     }
 
-    // 【v1.34.0】シングルクリックによる展開トグルと、ScriptUIのtreeviewがネイティブに持つ
-    // ダブルクリック時の展開/折りたたみ動作が重なると、「1回目のクリックでトグル→
-    // ダブルクリック判定時にネイティブ側がもう1回トグル」となり、見た目上「変化しない」
-    // 不具合が起きていた。ダブルクリックを無効化する直接的なAPIがScriptUIには無いため、
-    // 「クリックのトグルで決まったはずの状態」を記録しておき、tree.onDoubleClick発火時に
-    // その状態を強制的に再適用することで、ネイティブ側のダブルクリックトグル(発生して
-    // いたとしても)を実質的に無効化する。
-    var lastToggledTreeNode = null;
-    var lastToggledTreeExpandedState = null;
-
     // 【v1.35.0・確定原因への対処】tree.onChangeはScriptUI仕様上「選択状態が実際に変化した
     // 時にのみ」発火する。既に選択済みの同じカテゴリ行を再クリックした場合は選択状態が
     // 変化しないためonChangeが発火せず、展開トグルが「反応しない」ムラの原因になっていた
@@ -3790,18 +3780,17 @@ function buildAndShowDialog() {
     // (mousedown)を捕捉することで、同じ行への再クリックでも毎回確実にトグルされることを
     // 保証する。tree.onChange側の重複トグルは削除し(このイベントリスナーに一本化)、
     // tree.onChangeは本来の役割(選択された検出項目の詳細表示)のみを担う。
+    // 【v1.37.0・方針転換】v1.34.0で導入した「ダブルクリック時の打ち消しロジック
+    // (tree.onDoubleClick、lastToggledTreeNode/lastToggledTreeExpandedState)」は削除した。
+    // 実機ログで、単発クリックのつもりの操作でもScriptUIが内部的にダブルクリックと
+    // 誤検出し、打ち消しロジックがその都度発動してトグル結果を台無しにしていることが
+    // 確定したため(「トリプルクリックなら確実に反応する」という報告と整合する)。本物の
+    // ダブルクリック時に見た目上変化しないことがある副作用は許容し、シングルクリックの
+    // 信頼性を優先する。
     tree.addEventListener("mousedown", function () {
         var sel = tree.selection;
         if (!sel || sel.type !== "node") return; // 子を持たない末端ノードは対象外(誤動作防止)
         sel.expanded = !sel.expanded;
-        // この状態を「直近のクリックが意図した最終状態」として記録しておく。ダブルクリックの
-        // 場合、2回目のmousedownでもこのリスナーが発火し再度トグルするため、2回分の
-        // mousedown単独では自己相殺して元の状態に戻る計算になる。tree.onDoubleClick
-        // (下記)は、その2回のmousedown処理が終わった時点の「意図した状態」を、ネイティブ側が
-        // 独自に行うかもしれない追加のダブルクリックトグルに関係なく強制的に再適用する
-        // (発火順序に依存しない保険)。
-        lastToggledTreeNode = sel;
-        lastToggledTreeExpandedState = sel.expanded;
         dlog("TREE", "tree mousedown: カテゴリ行のexpandedをトグル -> " + sel.expanded);
     });
 
@@ -3866,26 +3855,8 @@ function buildAndShowDialog() {
         }
     };
 
-    // 【v1.34.0・確定対処→v1.35.0でトグル元をmousedownへ変更】カテゴリ行をダブルクリック
-    // すると、mousedown経由のトグル(2回分、上記参照)とScriptUIのtreeviewがネイティブに
-    // 持つダブルクリック時の展開/折りたたみ動作が重なり、見た目上「変化しない」不具合が
-    // 指摘された。ScriptUIにはダブルクリックのデフォルト展開動作を直接無効化するAPIが
-    // 無いため、ダブルクリック判定(このイベント)が発火した時点で、直近のmousedownが
-    // 記録しておいた「意図した最終状態」(lastToggledTreeNode/lastToggledTreeExpandedState、
-    // 上のtree.addEventListener("mousedown", ...)参照)を強制的に再適用することで、
-    // ネイティブ側が追加でトグルしていたとしても打ち消す。これにより、実際の内部動作の
-    // 発火順序に依存せず「ダブルクリックしてもクリック1回分から状態が変化しない」ことを
-    // 保証できる(ロジック自体はv1.34.0から変更なし、記録元がonChangeからmousedownに
-    // 変わっただけ)。
-    tree.onDoubleClick = function () {
-        var sel = tree.selection;
-        if (!sel || sel.type !== "node") return; // 子を持たない末端ノードは対象外(そもそも展開概念が無い)
-        if (sel === lastToggledTreeNode && lastToggledTreeExpandedState !== null) {
-            sel.expanded = lastToggledTreeExpandedState;
-            dlog("TREE", "tree.onDoubleClick: ネイティブ側のダブルクリック展開トグルを打ち消し、" +
-                "expanded=" + lastToggledTreeExpandedState + " へ再適用しました。");
-        }
-    };
+    // 【v1.37.0】tree.onDoubleClick(ダブルクリック時の打ち消しロジック)は撤廃した。
+    // 理由は上のtree.addEventListener("mousedown", ...)直前のコメント参照。
 
     // 【v1.19.0→v1.20.0】selStatusTextも選択結果メッセージの長さが可変(ロック解除の説明文等が
     // 連結されて長くなることがある)なため、noteTextと同じ動的サイズ見積もりを適用する
