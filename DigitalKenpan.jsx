@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.32.0";
+var KENPAN_VERSION = "1.33.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3762,6 +3762,22 @@ function buildAndShowDialog() {
         noteText.text = "";
         var sel = tree.selection;
         if (!sel) return;
+        // 【v1.33.0】カテゴリ行(node、例:「[エラー] サイズとトンボ」)のテキスト部分を
+        // クリックしても展開/折りたたみできるようにする(従来は行頭の矢印アイコンを
+        // クリックしないと展開できなかった)。矢印アイコンでのネイティブな展開/折りたたみ
+        // 動作はScriptUI標準機能のため一切触らない。ここでは選択変更時(=テキスト部分
+        // クリック時にtree.onChangeが発火する既存の仕組みを利用)に、選択されたのが
+        // カテゴリ(node、子を持つ)であればexpandedをトグルする処理だけを追加する。
+        // 子を持たない末端ノード(item、個々の検出項目)はsel.typeが"node"にならないため
+        // このトグル処理の対象外になり、従来通り詳細一覧・説明欄の表示のみ行う
+        // (誤動作しない)。
+        if (sel.type === "node") {
+            sel.expanded = !sel.expanded;
+            // カテゴリ行自体には詳細一覧・説明欄に表示する対象(resultRef)が無いため、
+            // detailList.removeAll()/noteText.textのクリア(この関数の先頭で実行済み)の
+            // 状態のままここで終える。
+            return;
+        }
         var r = sel.resultRef;
         if (!r) return;
         var noteParts = [];
