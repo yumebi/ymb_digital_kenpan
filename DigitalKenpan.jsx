@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.33.0";
+var KENPAN_VERSION = "1.34.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -3757,6 +3757,16 @@ function buildAndShowDialog() {
         return result;
     }
 
+    // 【v1.34.0】シングルクリックによる展開トグル(tree.onChange、下記参照)と、ScriptUIの
+    // treeviewがネイティブに持つダブルクリック時の展開/折りたたみ動作が重なると、
+    // 「1回目のクリックでトグル→ダブルクリック判定時にネイティブ側がもう1回トグル」となり、
+    // 見た目上「変化しない」不具合が起きていた。ダブルクリックを無効化する直接的なAPIが
+    // ScriptUIには無いため、「シングルクリックのトグルで決まったはずの状態」を記録しておき、
+    // tree.onDoubleClick発火時にその状態を強制的に再適用することで、ネイティブ側の
+    // ダブルクリックトグル(発生していたとしても)を実質的に無効化する。
+    var lastToggledTreeNode = null;
+    var lastToggledTreeExpandedState = null;
+
     tree.onChange = function () {
         detailList.removeAll();
         noteText.text = "";
@@ -3773,6 +3783,11 @@ function buildAndShowDialog() {
         // (誤動作しない)。
         if (sel.type === "node") {
             sel.expanded = !sel.expanded;
+            // 【v1.34.0】この状態を「シングルクリックが意図した最終状態」として記録しておく。
+            // すぐ後にダブルクリック判定(tree.onDoubleClick)が発火した場合、この状態を
+            // 再適用してネイティブ側の余分なトグルを打ち消す。
+            lastToggledTreeNode = sel;
+            lastToggledTreeExpandedState = sel.expanded;
             // カテゴリ行自体には詳細一覧・説明欄に表示する対象(resultRef)が無いため、
             // detailList.removeAll()/noteText.textのクリア(この関数の先頭で実行済み)の
             // 状態のままここで終える。
@@ -3824,6 +3839,25 @@ function buildAndShowDialog() {
         for (var i = 0; i < r.details.length; i++) {
             var li = detailList.add("item", r.details[i].text);
             li.itemRef = r.details[i].item;
+        }
+    };
+
+    // 【v1.34.0・確定対処】カテゴリ行をダブルクリックすると、1回目のクリックでの
+    // tree.onChange経由のトグルと、ScriptUIのtreeviewがネイティブに持つダブルクリック時の
+    // 展開/折りたたみ動作が重なり、見た目上「変化しない」不具合が指摘された。ScriptUIには
+    // ダブルクリックのデフォルト展開動作を直接無効化するAPIが無いため、ダブルクリック判定
+    // (このイベント)が発火した時点で、直前のシングルクリックが記録しておいた「意図した
+    // 最終状態」(lastToggledTreeNode/lastToggledTreeExpandedState、tree.onChange参照)を
+    // 強制的に再適用することで、ネイティブ側が追加でトグルしていたとしても打ち消す。
+    // これにより、実際の内部動作の発火順序に依存せず「ダブルクリックしてもシングルクリック
+    // 1回分から状態が変化しない」ことを保証できる。
+    tree.onDoubleClick = function () {
+        var sel = tree.selection;
+        if (!sel || sel.type !== "node") return; // 子を持たない末端ノードは対象外(そもそも展開概念が無い)
+        if (sel === lastToggledTreeNode && lastToggledTreeExpandedState !== null) {
+            sel.expanded = lastToggledTreeExpandedState;
+            dlog("TREE", "tree.onDoubleClick: ネイティブ側のダブルクリック展開トグルを打ち消し、" +
+                "expanded=" + lastToggledTreeExpandedState + " へ再適用しました。");
         }
     };
 
