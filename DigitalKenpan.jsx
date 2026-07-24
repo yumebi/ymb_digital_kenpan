@@ -336,6 +336,15 @@ function recordDocIdentity(doc) {
 // (存在すれば)を明示的に呼び、それでも足りない場合の保険としてdoc.windows[0].active
 // も試す。効果測定のため、アクティベート直後に再度プロパティを読み、
 // 「(不明)」ではなく実際のファイル名が取得できるようになったかをログに残す。
+// 【v1.33.0続報2】実機ログでdoc.activate()/doc.windows[0].activeが両方とも失敗し、
+// doc.name/doc.fullNameの読み取りすら失敗していたことが判明した。これはドキュメント
+// 単位の非アクティブ化ではなく、Illustrator内部のDOM文脈自体が完全に切断されている
+// (app.documents配列へのアクセス自体は通るが要素のプロパティ/メソッド呼び出しが軒並み
+// 例外を投げる)ことを示す。大元の文脈切断を解消するのはresolveTargetDoc()冒頭で呼ぶ
+// app.activate()(Applicationオブジェクトのメソッド、doc.activate()とは別物でOSレベルで
+// アプリ自体を前面化する)の役割とし、このactivateResolvedDoc()内のdoc.activate()/
+// doc.windows[0].activeは「(app.activate()で文脈は復活した前提で)複数ドキュメントが
+// 開いている時に対象を前面化する」という、より限定的な用途として位置づけを変更する。
 function activateResolvedDoc(doc) {
     if (!doc) return;
     safe(function () { app.activeDocument = doc; return null; }, null);
@@ -359,6 +368,26 @@ function activateResolvedDoc(doc) {
 }
 
 function resolveTargetDoc() {
+    // 【v1.33.0続報・確定原因への対処】実機ログで、doc.activate()/doc.windows[0].active
+    // 双方が失敗し、doc.name/doc.fullNameの読み取りすら失敗していたことが判明した。
+    // これは特定ドキュメントの非アクティブ化ではなく、Illustrator内部のDOM文脈自体が
+    // その時点で完全に切断されている状態を示す(app.documents配列へのアクセス自体は
+    // 通るが、要素のプロパティ・メソッド呼び出しが軒並み例外を投げる)。ドキュメント単位の
+    // doc.activate()では意味が無いため、より根本的にアプリケーション自体をOSレベルで
+    // 前面化する app.activate()(Applicationオブジェクトのメソッド。doc.activate()とは別物)
+    // を、ドキュメント読み取りを試みる前に呼ぶ。
+    var appActivateOk = safe(function () { app.activate(); return true; }, false);
+    dlog("PALETTE", "resolveTargetDoc: app.activate()実行: 成功=" + appActivateOk);
+    // app.activate()直後にapp.documents.length/app.documents[0].nameが正しく読めるように
+    // なったか、効果測定のためログに残す(次回実機ログでの確認ポイント)。
+    safe(function () {
+        var probeLen = app.documents.length;
+        var probeNm = (probeLen > 0) ? safe(function () { return app.documents[0].name; }, "(読み取り失敗)") : "(該当なし)";
+        dlog("PALETTE", "resolveTargetDoc: app.activate()直後の読み取り確認 app.documents.length=" +
+            probeLen + " app.documents[0].name=" + probeNm);
+        return null;
+    }, null);
+
     var docsInfo = [];
     var n = 0;
     safe(function () { n = app.documents.length; return null; }, null);
@@ -2715,6 +2744,22 @@ function buildAndShowDialog() {
     // ~24px+progressAbortRow~24px+spacing分の概算)。
     var progressGroupNaturalH = 90;
     progressGroup.visible = false;
+    // 【v1.33.0続報2・確定原因への対処】前回の対策(runBtn.onClick内の非表示化/復元サイクル)は
+    // 検版実行「後」の非表示化にのみ高さ0強制を適用しており、ダイアログを開いた直後の
+    // 初期状態(まだ一度も検版を実行していない=ここを通っただけの状態)には未対応だった。
+    // v1.28〜v1.29で確定した「ScriptUIは非表示要素の高さを縦積みレイアウト計算に含め
+    // 続ける既知の癖」は構築時点でも同様に発生するため、構築直後にも同じ高さ0強制を
+    // 適用しておく(win.onShow時点で既に0になっている状態を保証する)。
+    safe(function () {
+        var w0Init = (progressGroup.size && progressGroup.size[0] > 0) ? progressGroup.size[0] : 620;
+        progressGroup.preferredSize = [w0Init, 0];
+        progressGroup.size = [w0Init, 0];
+        progressGroup.minimumSize = [0, 0];
+        progressGroup.maximumSize = [100000, 0];
+        return null;
+    }, null);
+    dlog("PROGRESS", "progressGroup構築時の初期非表示化: size=" +
+        fmtArr(safe(function () { return progressGroup.size; }, null)));
 
     // ---- スクロール用ビューポート ----
     // ウィンドウを縮小すると設定項目が隠れて操作不能になる問題への対処。
