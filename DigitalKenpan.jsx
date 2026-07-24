@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.34.0";
+var KENPAN_VERSION = "1.36.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -2230,6 +2230,20 @@ function buildHtmlReport(doc, cfg, results, summary) {
     html += ".summary{font-size:22px;padding:12px;border-radius:6px;margin-bottom:16px;}\n";
     html += ".summary.ok{background:#e6f6ea;} .summary.ng{background:#fbe9e7;}\n";
     html += "ul{margin:4px 0;padding-left:20px;} li{font-size:12px;margin-bottom:2px;}\n";
+    // 【v1.36.0】カテゴリごとの検査結果テーブル(項目/判定/概要/検出内容の4列)は、
+    // テーブルごとに内容量が違うため列幅がブラウザの自動計算に任されており、テーブル間で
+    // 列幅が揃わずガタガタに見える不具合への対応。「設定値」テーブル(2列・key-value形式)
+    // とは列構成が異なるため、専用クラス(.report-table、下のcategoryテーブル生成箇所で
+    // 付与)でスコープし、既存の他のスタイル(背景色・警告色・.advice等)には一切影響しない
+    // ようにする。table-layout:fixedで列幅を固定値化し、はみ出し防止にword-break/
+    // overflow-wrapも併せて指定する(「検出内容」列は座標値やオブジェクト名の羅列で
+    // 長くなりやすいため、他列よりも広めに配分する)。
+    html += "table.report-table{table-layout:fixed;}\n";
+    html += "table.report-table th:nth-child(1),table.report-table td:nth-child(1){width:15%;}\n";
+    html += "table.report-table th:nth-child(2),table.report-table td:nth-child(2){width:8%;}\n";
+    html += "table.report-table th:nth-child(3),table.report-table td:nth-child(3){width:17%;}\n";
+    html += "table.report-table th:nth-child(4),table.report-table td:nth-child(4){width:60%;}\n";
+    html += "table.report-table td{word-break:break-all;overflow-wrap:break-word;}\n";
     html += "</style></head><body>\n";
     html += "<h1>デジタル検版レポート</h1>\n";
     html += "<p>ファイル名: " + escapeHtml(doc.name) + " / 出力日時: " + nowString() + " / ツールバージョン: v" + escapeHtml(KENPAN_VERSION) + "</p>\n";
@@ -2259,7 +2273,9 @@ function buildHtmlReport(doc, cfg, results, summary) {
 
     for (var c = 0; c < CATEGORY_ORDER.length; c++) {
         var cat = CATEGORY_ORDER[c];
-        html += "<h2>" + escapeHtml(cat) + "</h2>\n<table><tr><th>項目</th><th>判定</th><th>概要</th><th>検出内容</th></tr>\n";
+        // 【v1.36.0】列幅を全カテゴリテーブルで揃えるため専用クラスを付与(上のCSS参照)。
+        // 「設定値」テーブル(2246行付近、2列のkey-value形式)には付与しないため影響なし。
+        html += "<h2>" + escapeHtml(cat) + "</h2>\n<table class=\"report-table\"><tr><th>項目</th><th>判定</th><th>概要</th><th>検出内容</th></tr>\n";
         for (var i = 0; i < results.length; i++) {
             var r = results[i];
             if (r.category !== cat) continue;
@@ -3757,40 +3773,48 @@ function buildAndShowDialog() {
         return result;
     }
 
-    // 【v1.34.0】シングルクリックによる展開トグル(tree.onChange、下記参照)と、ScriptUIの
-    // treeviewがネイティブに持つダブルクリック時の展開/折りたたみ動作が重なると、
-    // 「1回目のクリックでトグル→ダブルクリック判定時にネイティブ側がもう1回トグル」となり、
-    // 見た目上「変化しない」不具合が起きていた。ダブルクリックを無効化する直接的なAPIが
-    // ScriptUIには無いため、「シングルクリックのトグルで決まったはずの状態」を記録しておき、
-    // tree.onDoubleClick発火時にその状態を強制的に再適用することで、ネイティブ側の
-    // ダブルクリックトグル(発生していたとしても)を実質的に無効化する。
+    // 【v1.34.0】シングルクリックによる展開トグルと、ScriptUIのtreeviewがネイティブに持つ
+    // ダブルクリック時の展開/折りたたみ動作が重なると、「1回目のクリックでトグル→
+    // ダブルクリック判定時にネイティブ側がもう1回トグル」となり、見た目上「変化しない」
+    // 不具合が起きていた。ダブルクリックを無効化する直接的なAPIがScriptUIには無いため、
+    // 「クリックのトグルで決まったはずの状態」を記録しておき、tree.onDoubleClick発火時に
+    // その状態を強制的に再適用することで、ネイティブ側のダブルクリックトグル(発生して
+    // いたとしても)を実質的に無効化する。
     var lastToggledTreeNode = null;
     var lastToggledTreeExpandedState = null;
+
+    // 【v1.35.0・確定原因への対処】tree.onChangeはScriptUI仕様上「選択状態が実際に変化した
+    // 時にのみ」発火する。既に選択済みの同じカテゴリ行を再クリックした場合は選択状態が
+    // 変化しないためonChangeが発火せず、展開トグルが「反応しない」ムラの原因になっていた
+    // (実機ログで確定)。onChange(選択変化時のみ)への依存をやめ、マウス入力そのもの
+    // (mousedown)を捕捉することで、同じ行への再クリックでも毎回確実にトグルされることを
+    // 保証する。tree.onChange側の重複トグルは削除し(このイベントリスナーに一本化)、
+    // tree.onChangeは本来の役割(選択された検出項目の詳細表示)のみを担う。
+    tree.addEventListener("mousedown", function () {
+        var sel = tree.selection;
+        if (!sel || sel.type !== "node") return; // 子を持たない末端ノードは対象外(誤動作防止)
+        sel.expanded = !sel.expanded;
+        // この状態を「直近のクリックが意図した最終状態」として記録しておく。ダブルクリックの
+        // 場合、2回目のmousedownでもこのリスナーが発火し再度トグルするため、2回分の
+        // mousedown単独では自己相殺して元の状態に戻る計算になる。tree.onDoubleClick
+        // (下記)は、その2回のmousedown処理が終わった時点の「意図した状態」を、ネイティブ側が
+        // 独自に行うかもしれない追加のダブルクリックトグルに関係なく強制的に再適用する
+        // (発火順序に依存しない保険)。
+        lastToggledTreeNode = sel;
+        lastToggledTreeExpandedState = sel.expanded;
+        dlog("TREE", "tree mousedown: カテゴリ行のexpandedをトグル -> " + sel.expanded);
+    });
 
     tree.onChange = function () {
         detailList.removeAll();
         noteText.text = "";
         var sel = tree.selection;
         if (!sel) return;
-        // 【v1.33.0】カテゴリ行(node、例:「[エラー] サイズとトンボ」)のテキスト部分を
-        // クリックしても展開/折りたたみできるようにする(従来は行頭の矢印アイコンを
-        // クリックしないと展開できなかった)。矢印アイコンでのネイティブな展開/折りたたみ
-        // 動作はScriptUI標準機能のため一切触らない。ここでは選択変更時(=テキスト部分
-        // クリック時にtree.onChangeが発火する既存の仕組みを利用)に、選択されたのが
-        // カテゴリ(node、子を持つ)であればexpandedをトグルする処理だけを追加する。
-        // 子を持たない末端ノード(item、個々の検出項目)はsel.typeが"node"にならないため
-        // このトグル処理の対象外になり、従来通り詳細一覧・説明欄の表示のみ行う
-        // (誤動作しない)。
+        // 【v1.33.0→v1.35.0】カテゴリ行(node、子を持つ)の展開/折りたたみトグル自体は
+        // 上のtree.addEventListener("mousedown", ...)に一本化した(このonChangeでは
+        // 二重にトグルしない)。カテゴリ行選択時は詳細一覧・説明欄に表示する対象
+        // (resultRef)が無いため、従来通りここで終える。
         if (sel.type === "node") {
-            sel.expanded = !sel.expanded;
-            // 【v1.34.0】この状態を「シングルクリックが意図した最終状態」として記録しておく。
-            // すぐ後にダブルクリック判定(tree.onDoubleClick)が発火した場合、この状態を
-            // 再適用してネイティブ側の余分なトグルを打ち消す。
-            lastToggledTreeNode = sel;
-            lastToggledTreeExpandedState = sel.expanded;
-            // カテゴリ行自体には詳細一覧・説明欄に表示する対象(resultRef)が無いため、
-            // detailList.removeAll()/noteText.textのクリア(この関数の先頭で実行済み)の
-            // 状態のままここで終える。
             return;
         }
         var r = sel.resultRef;
@@ -3842,15 +3866,17 @@ function buildAndShowDialog() {
         }
     };
 
-    // 【v1.34.0・確定対処】カテゴリ行をダブルクリックすると、1回目のクリックでの
-    // tree.onChange経由のトグルと、ScriptUIのtreeviewがネイティブに持つダブルクリック時の
-    // 展開/折りたたみ動作が重なり、見た目上「変化しない」不具合が指摘された。ScriptUIには
-    // ダブルクリックのデフォルト展開動作を直接無効化するAPIが無いため、ダブルクリック判定
-    // (このイベント)が発火した時点で、直前のシングルクリックが記録しておいた「意図した
-    // 最終状態」(lastToggledTreeNode/lastToggledTreeExpandedState、tree.onChange参照)を
-    // 強制的に再適用することで、ネイティブ側が追加でトグルしていたとしても打ち消す。
-    // これにより、実際の内部動作の発火順序に依存せず「ダブルクリックしてもシングルクリック
-    // 1回分から状態が変化しない」ことを保証できる。
+    // 【v1.34.0・確定対処→v1.35.0でトグル元をmousedownへ変更】カテゴリ行をダブルクリック
+    // すると、mousedown経由のトグル(2回分、上記参照)とScriptUIのtreeviewがネイティブに
+    // 持つダブルクリック時の展開/折りたたみ動作が重なり、見た目上「変化しない」不具合が
+    // 指摘された。ScriptUIにはダブルクリックのデフォルト展開動作を直接無効化するAPIが
+    // 無いため、ダブルクリック判定(このイベント)が発火した時点で、直近のmousedownが
+    // 記録しておいた「意図した最終状態」(lastToggledTreeNode/lastToggledTreeExpandedState、
+    // 上のtree.addEventListener("mousedown", ...)参照)を強制的に再適用することで、
+    // ネイティブ側が追加でトグルしていたとしても打ち消す。これにより、実際の内部動作の
+    // 発火順序に依存せず「ダブルクリックしてもクリック1回分から状態が変化しない」ことを
+    // 保証できる(ロジック自体はv1.34.0から変更なし、記録元がonChangeからmousedownに
+    // 変わっただけ)。
     tree.onDoubleClick = function () {
         var sel = tree.selection;
         if (!sel || sel.type !== "node") return; // 子を持たない末端ノードは対象外(そもそも展開概念が無い)
