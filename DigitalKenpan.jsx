@@ -469,6 +469,18 @@ var ABORT_FLAG = { on: false };
 // 一時的に参照を格納しておく(クロージャ自体は元のローカルスコープを保持するので、
 // 呼び出し元がグローバルであることは問題にならない)。
 var KENPAN_DEFERRED_SETTINGS_INIT = null;
+// 【v1.33.0続報3・確定原因への対処】実機ログでdoc.activate()/doc.windows[0].active/
+// app.activate()いずれも失敗し、ScriptUIのボタンonClickハンドラ内で即座にDOM(app
+// オブジェクト)へアクセスすること自体がこの実行タイミングでは機能していないことが
+// 確定した(ExtendScript+ScriptUIパレットの既知の癖: イベントコールバックのコール
+// スタックがまだ巻き戻っていない状態でDOM操作すると、内部のドキュメント文脈ブリッジが
+// 未初期化/不安定なことがある)。対策として、ドキュメント操作を伴う処理は
+// app.scheduleTask()で一度タスクキューに積み、コールスタックが完全に空になってから
+// 実行する。上のKENPAN_DEFERRED_SETTINGS_INITと同じパターン(グローバル変数に
+// クロージャを一時格納し、scheduleTaskの文字列からグローバル経由で呼ぶ)を踏襲する。
+var KENPAN_DEFERRED_JUMP_TO_SELECTED = null;
+var JUMP_TASK_PENDING = false; // ボタン連打時の多重scheduleTask積み過ぎを防止する簡易フラグ
+var KENPAN_JUMP_DELAY_MS = 50; // scheduleTaskの遅延(ms)。0msも試せるようパラメータ化しておく
 
 function abortKeyPressed() {
     return safe(function () {
@@ -4328,21 +4340,21 @@ function buildResultsWindow(results) {
             " テキスト内容(先頭50文字)=" + String(msg).substring(0, 50) + "...");
     }
 
-    function jumpToSelectedDetails(silent) {
-        dlog("PALETTE", "jumpToSelectedDetails呼び出し開始: silent=" + silent);
-        var sels = detailList.selection;
-        if (!sels) { if (!silent) alert("検出オブジェクト一覧から項目を選択してください。"); return; }
-        var arr = [];
-        if (sels.length !== undefined) {
-            for (var i = 0; i < sels.length; i++) { if (sels[i].itemRef) arr.push(sels[i].itemRef); }
-        } else {
-            if (sels.itemRef) arr.push(sels.itemRef);
-        }
-        if (arr.length === 0) {
-            setSelStatusText("この行にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
-            if (!silent) alert("選択した項目にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
-            return;
-        }
+    // 【v1.33.0続報3・対策】ドキュメント操作(resolveTargetDoc/activateResolvedDoc/
+    // selectAndZoom)を伴う本体処理。ボタンonClickハンドラのコールスタックが完全に
+    // 巻き戻ってからapp.scheduleTask経由で呼ばれる(下のjumpToSelectedDetails参照)。
+    function doJumpToSelectedDetailsDeferred(arr, silent) {
+        dlog("PALETTE", "jumpToSelectedDetails: 遅延実行が発火しました(silent=" + silent +
+            " 対象数=" + arr.length + ")");
+        // 発火直後のapp.documents読み取り確認(効果測定: コールスタックを空にしたことで
+        // DOM操作が安定して読めるようになったかどうかがここで判別できる)。
+        safe(function () {
+            var probeLen = app.documents.length;
+            var probeNm = (probeLen > 0) ? safe(function () { return app.documents[0].name; }, "(読み取り失敗)") : "(該当なし)";
+            dlog("PALETTE", "jumpToSelectedDetails: 遅延実行発火直後の読み取り確認 app.documents.length=" +
+                probeLen + " app.documents[0].name=" + probeNm);
+            return null;
+        }, null);
         // 【v1.33.0・非モーダル化】パレットは非モーダルでIllustrator本体を操作できるため、
         // 古いdoc参照を使い回さず、操作の都度resolveTargetDoc()で最新のドキュメント参照を
         // 取得し直す(feature/palette-modeでの誤警告の教訓を踏まえた設計)。
@@ -4357,6 +4369,7 @@ function buildResultsWindow(results) {
             if (!silent) alert(msgNoDoc);
             return;
         }
+        activateResolvedDoc(targetDoc);
         var rep = null;
         try {
             rep = selectAndZoom(targetDoc, arr);
@@ -4378,6 +4391,53 @@ function buildResultsWindow(results) {
         }
         setSelStatusText(statusMsg);
         dlog("PALETTE", "jumpToSelectedDetails完了: 選択件数=" + rep.count);
+    }
+
+    function jumpToSelectedDetails(silent) {
+        dlog("PALETTE", "jumpToSelectedDetails呼び出し開始: silent=" + silent);
+        // ここまで(detailList.selectionの読み取り)は純粋なScriptUI側の操作で、app/
+        // documentのDOM操作を伴わないため同期実行のままでよい。
+        var sels = detailList.selection;
+        if (!sels) { if (!silent) alert("検出オブジェクト一覧から項目を選択してください。"); return; }
+        var arr = [];
+        if (sels.length !== undefined) {
+            for (var i = 0; i < sels.length; i++) { if (sels[i].itemRef) arr.push(sels[i].itemRef); }
+        } else {
+            if (sels.itemRef) arr.push(sels.itemRef);
+        }
+        if (arr.length === 0) {
+            setSelStatusText("この行にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
+            if (!silent) alert("選択した項目にはオブジェクト参照がありません(ドキュメント全体に関する指摘です)。");
+            return;
+        }
+        // 【v1.33.0続報3・対策】ここから先(resolveTargetDoc/activateResolvedDoc/
+        // selectAndZoom)はDOM操作を伴う。実機ログでdoc.activate()/doc.windows[0].active/
+        // app.activate()いずれも失敗することが確定しており、ボタンonClickハンドラの
+        // コールスタックがまだ巻き戻っていない状態でDOM操作すること自体が原因と判断した。
+        // app.scheduleTask()で一度タスクキューに積み、コールスタックが完全に空になって
+        // から実行することで、この文脈不安定を回避できるか試す。
+        if (JUMP_TASK_PENDING) {
+            dlog("PALETTE", "jumpToSelectedDetails: 既に遅延実行待ちのため多重実行を防止してスキップ");
+            return;
+        }
+        JUMP_TASK_PENDING = true;
+        KENPAN_DEFERRED_JUMP_TO_SELECTED = function () {
+            JUMP_TASK_PENDING = false;
+            doJumpToSelectedDetailsDeferred(arr, silent);
+        };
+        dlog("PALETTE", "jumpToSelectedDetails: app.scheduleTaskに積みます(遅延=" + KENPAN_JUMP_DELAY_MS + "ms)");
+        var scheduleOk = safe(function () {
+            app.scheduleTask("KENPAN_DEFERRED_JUMP_TO_SELECTED();", KENPAN_JUMP_DELAY_MS, false);
+            return true;
+        }, false);
+        dlog("PALETTE", "jumpToSelectedDetails: app.scheduleTask登録: 成功=" + scheduleOk);
+        if (!scheduleOk) {
+            // scheduleTask自体が使えない場合の保険: 同期実行にフォールバックする
+            // (元の挙動と同じになるだけで、悪化はしない)。
+            dlog("PALETTE", "jumpToSelectedDetails: scheduleTask失敗のため同期実行にフォールバック");
+            JUMP_TASK_PENDING = false;
+            doJumpToSelectedDetailsDeferred(arr, silent);
+        }
     }
 
     selectBtn.onClick = function () { jumpToSelectedDetails(false); };
