@@ -324,6 +324,40 @@ function recordDocIdentity(doc) {
 // の順に試す。見つかった場合はapp.activeDocumentへ自動アクティブ化を試みる。
 // パレット側でドキュメントを操作する全箇所は、古いdoc参照を使い回さず必ずこの関数を
 // 呼び直してから使うこと。
+// 【v1.33.0続報・確定原因への対処】実機ログで、resolveTargetDoc()自体は
+// app.documents配列からドキュメントを正しく発見できていたにもかかわらず、その直後の
+// app.documents[i].name / .fullName の読み取りが例外を投げ「(不明)」「(未保存)」に
+// フォールバックしていたことが判明した(STATE.docFullNameには正しいパスが保存済み)。
+// これは「ドキュメントはapp.documents配列には存在するが、Illustrator内部の
+// “現在のドキュメント文脈”がその時点で無効」という典型パターンで、パレットにOS
+// フォーカスがあり、どのドキュメントウィンドウもフロントに来ていない状態でDOM操作を
+// 行うと発生する既知の癖(最初のパレット化試行でも同じ症状に遭遇していた)。
+// app.activeDocumentへの代入だけでは不十分だったため、doc.activate()
+// (存在すれば)を明示的に呼び、それでも足りない場合の保険としてdoc.windows[0].active
+// も試す。効果測定のため、アクティベート直後に再度プロパティを読み、
+// 「(不明)」ではなく実際のファイル名が取得できるようになったかをログに残す。
+function activateResolvedDoc(doc) {
+    if (!doc) return;
+    safe(function () { app.activeDocument = doc; return null; }, null);
+    var actOk = safe(function () {
+        if (doc.activate) { doc.activate(); return true; }
+        return false;
+    }, false);
+    dlog("PALETTE", "activateResolvedDoc: doc.activate()実行: 成功=" + actOk);
+    var winActOk = safe(function () {
+        if (doc.windows && doc.windows.length > 0) { doc.windows[0].active = true; return true; }
+        return false;
+    }, false);
+    dlog("PALETTE", "activateResolvedDoc: doc.windows[0].active設定: 成功=" + winActOk);
+    // 効果測定: アクティベート直後にプロパティを再度読んでみて、正常化したか確認する
+    // (「(不明)」「(読み取り失敗)」のままなら、activate()/windows[0].activeどちらも
+    // 効いていないことがログだけで判別できる)。
+    var nmAfter = safe(function () { return doc.name; }, "(読み取り失敗)");
+    var fpAfter = safe(function () { return doc.fullName.fsName; }, "(読み取り失敗・未保存)");
+    dlog("PALETTE", "activateResolvedDoc: アクティベート後の読み取り確認 name=" + nmAfter +
+        " fullName=" + fpAfter + " (doc.activate成功=" + actOk + " windows[0].active成功=" + winActOk + ")");
+}
+
 function resolveTargetDoc() {
     var docsInfo = [];
     var n = 0;
@@ -352,7 +386,7 @@ function resolveTargetDoc() {
             })(i2), null);
             if (found) {
                 dlog("PALETTE", "resolveTargetDoc: パス一致で解決 -> " + STATE.docFullName);
-                safe(function () { app.activeDocument = found; return null; }, null);
+                activateResolvedDoc(found);
                 return found;
             }
         }
@@ -371,7 +405,7 @@ function resolveTargetDoc() {
         }
         if (nameMatches.length === 1) {
             dlog("PALETTE", "resolveTargetDoc: 名前一致で解決 -> " + STATE.docName);
-            safe(function () { app.activeDocument = nameMatches[0]; return null; }, null);
+            activateResolvedDoc(nameMatches[0]);
             return nameMatches[0];
         } else if (nameMatches.length > 1) {
             dlog("PALETTE", "resolveTargetDoc: 名前一致が複数件(" + nameMatches.length + "件)のため曖昧、解決失敗扱い");
@@ -382,7 +416,7 @@ function resolveTargetDoc() {
         var onlyDoc = safe(function () { return app.documents[0]; }, null);
         if (onlyDoc) {
             dlog("PALETTE", "resolveTargetDoc: 単一ドキュメント保険で解決");
-            safe(function () { app.activeDocument = onlyDoc; return null; }, null);
+            activateResolvedDoc(onlyDoc);
             return onlyDoc;
         }
     }
@@ -3314,6 +3348,29 @@ function buildAndShowDialog() {
             return null;
         }, null);
 
+        // 【v1.33.0続報】検査中は仕上がりサイズ/印刷カラー数/各種数値設定/チェック項目の
+        // フォーム全体(settingsViewportRow)を隠し、進捗表示だけをすっきり見せる。
+        // 【スコープ限定】既存のスクロール/フィットロジックの計算式自体(applySettingsWindowFit
+        // 内の幾何計算)は変更せず、可視性の切り替えのみ行う。ただしprogressGroupで既に
+        // 確認済みの「ScriptUIは非表示要素の高さを縦積み計算に含め続ける既知の癖」への
+        // 対策として、非表示化と同時に高さ制約も明示的に0へ強制する(v1.29.0と同じ手法)。
+        // settingsViewportRowの高さは(progressGroupと異なり)固定の自然値ではなく、
+        // ウィンドウサイズに応じてapplySettingsResize()が毎回絶対値で再計算するため、
+        // 復元時に「自然な高さをキャッシュして戻す」必要が無く、単にapplySettingsResize()を
+        // 呼び直すだけで正しいサイズに戻る。
+        safe(function () {
+            var vw0 = (settingsViewportRow.size && settingsViewportRow.size[0] > 0) ? settingsViewportRow.size[0] : 700;
+            settingsViewportRow.preferredSize = [vw0, 0];
+            settingsViewportRow.size = [vw0, 0];
+            settingsViewportRow.minimumSize = [0, 0];
+            settingsViewportRow.maximumSize = [100000, 0];
+            return null;
+        }, null);
+        settingsViewportRow.visible = false;
+        safeWinLayout(settingsPanel);
+        dlog("SCROLL", "runBtn.onClick: settingsViewportRow非表示化。size=" +
+            fmtArr(safe(function () { return settingsViewportRow.size; }, null)));
+
         var results = null;
         var wasAborted = false;
         var runError = null;
@@ -3363,9 +3420,22 @@ function buildAndShowDialog() {
             progressGroup.maximumSize = [100000, 0];
             return null;
         }, null);
+        // 【v1.33.0続報】検査中に隠したsettingsViewportRow(設定フォーム全体)を、成功・失敗・
+        // 中断いずれの場合も必ず再表示する。高さ制約(0固定)を解除するだけで、実際のサイズは
+        // 次のapplySettingsResize()呼び出しが絶対値で再計算するため、ここで「自然な高さ」を
+        // 自前計算する必要は無い。
+        safe(function () {
+            settingsViewportRow.minimumSize = [0, 0];
+            settingsViewportRow.maximumSize = [100000, 100000];
+            return null;
+        }, null);
+        settingsViewportRow.visible = true;
         safeWinLayout(settingsPanel);
         applySettingsResize();
         updateSettingsScrollRange();
+        dlog("SCROLL", "runBtn.onClick: settingsViewportRow再表示。size=" +
+            fmtArr(safe(function () { return settingsViewportRow.size; }, null)) +
+            " location=" + fmtArr(safe(function () { return settingsViewportRow.location; }, null)));
         dlog("PROGRESS", "runBtn.onClick後始末: progressGroup非表示化後: size=" +
             fmtArr(safe(function () { return progressGroup.size; }, null)) +
             " settingsViewportRow.location=" + fmtArr(safe(function () { return settingsViewportRow.location; }, null)));
