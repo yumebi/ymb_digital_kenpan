@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.38.0";
+var KENPAN_VERSION = "1.39.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -2327,12 +2327,86 @@ function buildCsvReport(doc, cfg, results) {
     return joinArr(lines, "\r\n");
 }
 
+// 文字列(ExtendScript内部表現=UTF-16)を、1文字=1バイトを表す文字列(各charCodeが
+// 0x00〜0xFF)へ変換する。encoding="BINARY" で書き込むと1文字がそのまま1バイトになるため、
+// この戻り値を書けば任意のUTF-8バイト列を正確に出力できる。
+// 【v1.39.0】UTF-16のサロゲートペア(絵文字等のBMP外文字)も正しく1つのコードポイントへ
+// 合成してから4バイトのUTF-8へ変換する。
+function utf8BytesFromString(str) {
+    var out = [];
+    var i = 0;
+    var len = str.length;
+    while (i < len) {
+        var cp = str.charCodeAt(i);
+        i++;
+        // 上位サロゲート(0xD800〜0xDBFF)なら、続く下位サロゲートと合成して実コードポイントにする
+        if (cp >= 0xD800 && cp <= 0xDBFF && i < len) {
+            var low = str.charCodeAt(i);
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) * 0x400) + (low - 0xDC00);
+                i++;
+            }
+        }
+        // 1コードポイント分のバイト列をまとめて1要素としてpushする(1バイトずつpushすると
+        // 日本語主体のレポートでは配列長が約3倍になり、大量検出時のjoinが重くなるため)。
+        if (cp < 0x80) {
+            out.push(String.fromCharCode(cp));
+        } else if (cp < 0x800) {
+            out.push(String.fromCharCode(0xC0 | (cp >> 6),
+                                         0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push(String.fromCharCode(0xE0 | (cp >> 12),
+                                         0x80 | ((cp >> 6) & 0x3F),
+                                         0x80 | (cp & 0x3F)));
+        } else {
+            out.push(String.fromCharCode(0xF0 | (cp >> 18),
+                                         0x80 | ((cp >> 12) & 0x3F),
+                                         0x80 | ((cp >> 6) & 0x3F),
+                                         0x80 | (cp & 0x3F)));
+        }
+    }
+    return out.join("");
+}
+
+// UTF-8のBOM付きでテキストファイルを書き出す(CSVをExcelで開いた際の文字化け対策)。
+//
+// 【v1.39.0・確定原因への対処】旧実装は encoding="UTF-8" のまま
+// file.write("﻿" + text) としてBOM付与を試みていたが、実際に生成されたCSVの
+// 先頭バイトを確認したところ EF BB BF が存在せず、本文の "# DigitalKenpan v..." から
+// 始まっていた(本文自体のUTF-8エンコードは正しかった)。BOMが無いためExcelが
+// CP932(Shift-JIS)と誤認して文字化けしていた。原因は、ExtendScriptのFileオブジェクトが
+// encoding="UTF-8" のときに書き込み文字列先頭のU+FEFFを「BOM文字」と解釈して
+// 除去してしまうため。ソース上のリテラルは正しくU+FEFFになっており、書き込み側の挙動が原因。
+//
+// 【重要・将来の単純化による再発防止】この関数を
+//   file.encoding = "UTF-8"; file.write("﻿" + text);
+// のような「素直な」書き方に戻してはならない。上記の理由で必ずBOMが消える。
+//
+// 【採用方式】ファイル全体を encoding="BINARY" で開き、BOMの3バイトと、自前でUTF-8へ
+// 変換した本文バイト列を書き込む。ExtendScriptのエンコーダに一切依存しないため、
+// 環境(Win/Mac、Illustratorのバージョン)による挙動差が原理的に発生しない。
+// なお「BOMだけBINARYで書き、途中で encoding を "UTF-8" に切り替えて本文を書く」という
+// イディオムもあるが、openしたままのencoding切り替えは環境によって効かない可能性があるため
+// 採用しなかった(万一の保険として、下のcatch節でその方式にフォールバックする)。
 function writeTextFileUTF8BOM(file, text) {
-    file.encoding = "UTF-8";
-    file.open("w");
-    // ExtendScriptのFile#write(UTF-8指定)はBOMを付与しないため明示的に付与する
-    file.write("﻿" + text);
-    file.close();
+    try {
+        file.encoding = "BINARY";
+        if (!file.open("w")) throw new Error("ファイルを書き込みモードで開けませんでした: " + file.fsName);
+        // BOM (EF BB BF) + 本文のUTF-8バイト列。BINARYでは1文字がそのまま1バイトになる。
+        file.write(String.fromCharCode(0xEF) + String.fromCharCode(0xBB) + String.fromCharCode(0xBF));
+        file.write(utf8BytesFromString(text));
+        file.close();
+    } catch (eWrite) {
+        // フォールバック: 自前変換が何らかの理由で失敗した場合、BOMのみBINARYで書いてから
+        // encodingをUTF-8へ切り替えて本文を書く方式を試す(本文のエンコードはExtendScript任せ)。
+        safe(function () { file.close(); return null; }, null);
+        file.encoding = "BINARY";
+        file.open("w");
+        file.write(String.fromCharCode(0xEF) + String.fromCharCode(0xBB) + String.fromCharCode(0xBF));
+        file.encoding = "UTF-8";
+        file.write(text);
+        file.close();
+    }
 }
 
 // -----------------------------------------------------------------------------
