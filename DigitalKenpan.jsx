@@ -278,9 +278,15 @@ function escapeHtml(s) {
 }
 
 // CSVフィールドエスケープ
+// 【v1.41.0】CSV数式インジェクション対策: Excel等でセルが数式として評価される
+// 先頭文字(= + - @ と、タブ・CR)で始まる値は、先頭に「'」を付けて文字列化する。
+// 引用符/カンマ/改行を含む値は従来どおりダブルクォートで包む。
 function escapeCsv(s) {
     if (s === undefined || s === null) s = "";
     s = String(s);
+    if (/^[=+\-@\t\r]/.test(s)) {
+        s = "'" + s;
+    }
     if (s.indexOf(",") >= 0 || s.indexOf("\"") >= 0 || s.indexOf("\n") >= 0 || s.indexOf("\r") >= 0) {
         s = "\"" + s.replace(/"/g, "\"\"") + "\"";
     }
