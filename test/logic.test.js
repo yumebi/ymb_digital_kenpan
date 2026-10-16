@@ -26,6 +26,10 @@ const spot = (alt, tint) => ({ typename: 'SpotColor', tint, spot: { color: alt }
 
 // ---- 色 ----
 
+test('KENPAN_VERSION: 「数字.数字.数字」の形式(レポートやタイトルに出る版表示)', () => {
+  assert.match(k.KENPAN_VERSION, /^\d+\.\d+\.\d+$/);
+});
+
 test('cmykInkTotal: CMYK は4色の合計', () => {
   assert.equal(k.cmykInkTotal(cmyk(100, 50, 30, 20)), 200);
   assert.equal(k.cmykInkTotal(cmyk(100, 100, 100, 100)), 400);
