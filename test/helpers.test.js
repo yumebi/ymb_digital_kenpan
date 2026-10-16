@@ -52,6 +52,18 @@ test('escapeCsv: カンマ・引用符・改行を含むときだけ引用符で
   assert.equal(k.escapeCsv(undefined), '');
 });
 
+test('escapeCsv: = + - @ やタブで始まる値は、数式として評価されないよう先頭に「\'」を付ける', () => {
+  assert.equal(k.escapeCsv('=1+1'), "'=1+1");
+  assert.equal(k.escapeCsv('+81-3'), "'+81-3");
+  assert.equal(k.escapeCsv('-5'), "'-5");
+  assert.equal(k.escapeCsv('@SUM(A1)'), "'@SUM(A1)");
+  assert.equal(k.escapeCsv('\tcmd'), "'\tcmd");
+  // 先頭以外にあっても無害なので、そのまま
+  assert.equal(k.escapeCsv('a=b'), 'a=b');
+  // 無害化したうえで、カンマを含めば従来どおり引用符で囲む
+  assert.equal(k.escapeCsv('=a,b'), "\"'=a,b\"");
+});
+
 test('チェック項目: 25件で、重複がなく、設定の既定値・解説(CHECK_META)と過不足なく対応する', () => {
   const ids = k.getCheckIdOrder();
   assert.equal(ids.length, 25);
