@@ -789,7 +789,9 @@ function readImageInfo(file) {
         if (bytes.length >= 26) {
             var bw = b32le(bytes, 18);
             var bh = b32le(bytes, 22);
-            if (bh < 0) bh = -bh;
+            // biHeight は符号つき32bit。負なら上下反転(top-down)で保存された画像で、高さはその絶対値。
+            // b32le は常に非負を返すため、以前の「bh < 0」は常に偽で、上下反転のBMPの高さを約43億と読んでいた。
+            if (bh >= 2147483648) bh = 4294967296 - bh;
             var bmpBpp = (bytes.length >= 30) ? b16le(bytes, 28) : 24;
             return { ok: true, format: "BMP", width: bw, height: bh, colorMode: "RGB", isBitmap: (bmpBpp === 1) };
         }
