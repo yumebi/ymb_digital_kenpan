@@ -49,6 +49,17 @@ Adobe Illustrator 用のデジタル検版(プリフライトチェック)スク
 
 詳細な判定ロジック・制限事項・チェック項目の追加方法は **[docs/SPEC.md](docs/SPEC.md)** を、開発の経緯は **[docs/CHANGELOG.md](docs/CHANGELOG.md)** を参照してください。
 
+### 開発者向け: テスト
+
+`DigitalKenpan.jsx` の純粋な関数(単位換算・HTML/CSV のエスケープ・設定の保存/読込・チェック項目の整合)を、
+Node で実際のソースから取り出してテストします(Illustrator は不要。`DigitalKenpan.jsx` 自体は変更しません)。
+
+```
+npm test
+```
+
+`test/` と `package.json` はテスト専用で、配布物(`DigitalKenpan.jsx` 1ファイル)には影響しません。
+
 ## ライセンス
 
 MIT License
