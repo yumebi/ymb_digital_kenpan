@@ -51,8 +51,11 @@ Adobe Illustrator 用のデジタル検版(プリフライトチェック)スク
 
 ### 開発者向け: テスト
 
-`DigitalKenpan.jsx` の純粋な関数(単位換算・HTML/CSV のエスケープ・設定の保存/読込・チェック項目の整合)を、
-Node で実際のソースから取り出してテストします(Illustrator は不要。`DigitalKenpan.jsx` 自体は変更しません)。
+`DigitalKenpan.jsx` の純粋な関数を、Node で実際のソースから取り出してテストします
+(Illustrator は不要。テストのために `DigitalKenpan.jsx` を分割・改変することはありません)。
+対象は、単位換算・HTML/CSV のエスケープ・設定の保存/読込・チェック項目の整合のほか、
+画像ヘッダの解析(PNG / JPEG / GIF / BMP / TIFF / PSD)、UTF-8 への変換、インキ総量・白判定、
+サイズ照合、実効解像度の計算、判定の集計、CSV レポートです。
 
 ```
 npm test
