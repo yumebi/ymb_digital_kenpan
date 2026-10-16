@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.42.0";
+var KENPAN_VERSION = "1.43.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -389,6 +389,7 @@ function defaultConfig() {
         maxObjectCount: 100000,    // ベクトルオブジェクト総数の警告閾値
         thinLinePt: 0.5,           // 細ケイ+薄アミ検出: 線幅閾値(pt)
         lightInkPercent: 20,       // 細ケイ+薄アミ検出: 濃度合計閾値(%)
+        ignoreLayers: "",          // 検版から除外するレイヤー名(カンマ・読点・改行区切り。サブレイヤーも除外)
         checks: {
             size_match: true,
             bleed: true,
@@ -455,6 +456,7 @@ function serializeConfig(cfg) {
     lines.push("maxObjectCount=" + cfg.maxObjectCount);
     lines.push("thinLinePt=" + cfg.thinLinePt);
     lines.push("lightInkPercent=" + cfg.lightInkPercent);
+    lines.push("ignoreLayers=" + String(cfg.ignoreLayers || "").replace(/[\r\n]+/g, ","));
     var checkIds = getCheckIdOrder();
     var checkStr = "";
     for (var i = 0; i < checkIds.length; i++) {
@@ -495,6 +497,7 @@ function parseConfig(text, base) {
         else if (key === "maxObjectCount") cfg.maxObjectCount = parseFloat(val);
         else if (key === "thinLinePt") cfg.thinLinePt = parseFloat(val);
         else if (key === "lightInkPercent") cfg.lightInkPercent = parseFloat(val);
+        else if (key === "ignoreLayers") cfg.ignoreLayers = val;
         else if (key === "checks") {
             var parts = val.split(",");
             for (var j = 0; j < parts.length; j++) {
@@ -753,6 +756,10 @@ function b32le(bytes, i) { return ((bytes[i + 3] * 16777216) + (bytes[i + 2] << 
 // runPreflight 実行のたびにリセットする。
 var IMAGE_INFO_CACHE = {};
 
+// 実行時のオプション。画面(設定→検版実行)から実行するときだけ history を true にして、
+// 前回の結果との比較と、今回の結果の保存を行う(一括検版や自動テストでは行わない)。
+var RUN_OPTS = { history: false };
+
 function getImageInfoCached(file) {
     var key = safe(function () { return file.fsName; }, null);
     if (key === null) return { ok: false };
@@ -919,8 +926,9 @@ function readImageInfo(file) {
 // 6. ドキュメント全体スキャン(再帰は1回のみ・各チェックはこの結果を共有する)
 // -----------------------------------------------------------------------------
 
-function scanDocument(doc, progressCb) {
+function scanDocument(doc, progressCb, ignoreNames) {
     var items = [];
+    items.ignoredLayers = []; // 除外したレイヤー { name, count }
     var scanCount = { n: 0 };
 
     function pushRecord(item, layerName, hiddenInherited, lockedInherited) {
@@ -963,6 +971,12 @@ function scanDocument(doc, progressCb) {
     }
 
     function walkLayer(layer, hiddenInherited, lockedInherited) {
+        // 除外指定のレイヤーは、サブレイヤーも含めて走査しない(各チェックにも渡らない)
+        var layerNameForIgnore = safe(function () { return layer.name; }, "");
+        if (isIgnoredName(layerNameForIgnore, ignoreNames)) {
+            items.ignoredLayers.push({ name: layerNameForIgnore, count: safe(function () { return layer.pageItems.length; }, 0) });
+            return;
+        }
         var lHidden = hiddenInherited || !layer.visible;
         var lLocked = lockedInherited || layer.locked;
         var kids = safe(function () { return layer.pageItems; }, null);
@@ -1088,6 +1102,239 @@ function sizeOutliers(sizes, tol) {
         if (!inBest) out.push(n);
     }
     return { base: best.size, mismatches: out };
+}
+
+// ---- v1.43.0: 除外レイヤー・前回との比較・プリセット・一括検版の補助 ----
+
+// 「メモ, ガイド」のような入力(カンマ・読点・改行区切り)を、名前の配列にする。
+function parseNameList(text) {
+    var out = [];
+    if (!text) return out;
+    var parts = String(text).split(/[,、，\r\n]+/);
+    for (var i = 0; i < parts.length; i++) {
+        var s = parts[i].replace(/^\s+|\s+$/g, "");
+        if (s !== "") out.push(s);
+    }
+    return out;
+}
+
+// レイヤー名が除外リストにあるか(大文字小文字は区別しない。完全一致)。
+function isIgnoredName(name, list) {
+    if (!name || !list || list.length === 0) return false;
+    var lower = String(name).toLowerCase();
+    for (var i = 0; i < list.length; i++) {
+        if (String(list[i]).toLowerCase() === lower) return true;
+    }
+    return false;
+}
+
+// プリセット名からファイル名に使えない文字を取り除く。空になったら空文字を返す。
+function sanitizePresetName(name) {
+    var s = String(name === undefined || name === null ? "" : name);
+    s = s.replace(/[\\\/:*?"<>|\r\n\t]/g, "_");
+    s = s.replace(/^\s+|\s+$/g, "");
+    s = s.replace(/^\.+/, "");
+    if (s.length > 60) s = s.substring(0, 60);
+    return s;
+}
+
+// 検出結果を、前回と突き合わせるための文字列(キー)の配列にする。OK・対象外は含めない。
+// 詳細が無い警告・エラーは「項目ID + 判定」を1件として数える。
+function detectionKeys(results) {
+    var keys = [];
+    for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        if (r.status !== "NG" && r.status !== "WARN" && r.status !== "INFO") continue;
+        if (r.details.length === 0) {
+            keys.push(r.id + "\t(" + r.status + ")");
+        } else {
+            for (var d = 0; d < r.details.length; d++) {
+                keys.push(r.id + "\t" + String(r.details[d].text).replace(/[\r\n]+/g, " "));
+            }
+        }
+    }
+    return keys;
+}
+
+// 前回と今回のキーを比べる。戻り値: { added:[今回だけ], resolved:[前回だけ(解消)], same:変わらない件数 }
+function compareDetections(prevKeys, curKeys) {
+    var prevSet = {}, curSet = {};
+    var i;
+    for (i = 0; i < prevKeys.length; i++) prevSet["k:" + prevKeys[i]] = true;
+    for (i = 0; i < curKeys.length; i++) curSet["k:" + curKeys[i]] = true;
+    var added = [], resolved = [], same = 0;
+    for (i = 0; i < curKeys.length; i++) {
+        if (prevSet["k:" + curKeys[i]]) same++;
+        else added.push(curKeys[i]);
+    }
+    for (i = 0; i < prevKeys.length; i++) {
+        if (!curSet["k:" + prevKeys[i]]) resolved.push(prevKeys[i]);
+    }
+    return { added: added, resolved: resolved, same: same };
+}
+
+// 文字列の簡易ハッシュ(16進)。履歴ファイル名にドキュメントのパスを織り込むために使う。
+function hashString(s) {
+    var h = 5381;
+    s = String(s);
+    for (var i = 0; i < s.length; i++) {
+        h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+    }
+    return h.toString(16);
+}
+
+// 一括検版の総合判定の表示名。
+function batchOverall(summary) {
+    if (summary.ngCount > 0) return "エラーあり";
+    if (summary.warnCount > 0) return "警告あり";
+    return "OK";
+}
+
+// 一括検版の結果(ファイルごとの行)を、CSVテキストにする。
+// rows: [{ name, error, summary:{ngCount,warnCount,infoCount}, statuses:{項目ID:判定} }]
+function buildBatchCsv(rows, idOrder) {
+    var head = [escapeCsv("ファイル名"), escapeCsv("総合判定"), escapeCsv("エラー"), escapeCsv("警告"), escapeCsv("情報")];
+    var i, k;
+    for (k = 0; k < idOrder.length; k++) head.push(escapeCsv(CHECK_META[idOrder[k]].name));
+    var lines = [];
+    lines.push(escapeCsv("# DigitalKenpan v" + KENPAN_VERSION + " / 一括検版 / 出力日時: " + nowString()));
+    lines.push(joinArr(head, ","));
+    for (i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var cells = [];
+        if (r.error) {
+            cells = [escapeCsv(r.name), escapeCsv("検版できませんでした: " + r.error), "", "", ""];
+            for (k = 0; k < idOrder.length; k++) cells.push("");
+        } else {
+            cells = [escapeCsv(r.name), escapeCsv(batchOverall(r.summary)), r.summary.ngCount, r.summary.warnCount, r.summary.infoCount];
+            for (k = 0; k < idOrder.length; k++) {
+                cells.push(escapeCsv(r.statuses[idOrder[k]] ? statusLabelOf(r.statuses[idOrder[k]]) : ""));
+            }
+        }
+        lines.push(joinArr(cells, ","));
+    }
+    return joinArr(lines, "\r\n");
+}
+
+// ---- プリセット・履歴の保存先(ユーザーのデータフォルダ。常に書き込める) ----
+
+function getDataFolder(sub) {
+    var root = new Folder(Folder.userData + "/DigitalKenpan");
+    if (!root.exists) root.create();
+    if (!sub) return root;
+    var f = new Folder(root.fsName + "/" + sub);
+    if (!f.exists) f.create();
+    return f;
+}
+
+function presetFile(name) {
+    return new File(getDataFolder("presets").fsName + "/" + sanitizePresetName(name) + ".txt");
+}
+
+// 保存済みのプリセット名の一覧(名前順)。
+function listPresetNames() {
+    var names = [];
+    var files = safe(function () { return getDataFolder("presets").getFiles("*.txt"); }, null);
+    if (!files) return names;
+    for (var i = 0; i < files.length; i++) {
+        var n = safe(function () { return decodeURI(files[i].name); }, "");
+        if (n) names.push(n.replace(/\.txt$/i, ""));
+    }
+    names.sort();
+    return names;
+}
+
+function savePresetConfig(name, cfg) {
+    try {
+        if (!sanitizePresetName(name)) return false;
+        var f = presetFile(name);
+        f.encoding = "UTF-8";
+        f.open("w");
+        f.write(serializeConfig(cfg));
+        f.close();
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// プリセットを読み込む。無い・読めないときは null。
+function loadPresetConfig(name) {
+    try {
+        var f = presetFile(name);
+        if (!f.exists) return null;
+        f.encoding = "UTF-8";
+        f.open("r");
+        var text = f.read();
+        f.close();
+        return parseConfig(text, defaultConfig());
+    } catch (e) {
+        return null;
+    }
+}
+
+function deletePreset(name) {
+    try {
+        var f = presetFile(name);
+        return f.exists ? f.remove() : false;
+    } catch (e) {
+        return false;
+    }
+}
+
+// 前回の検版結果の保存先。保存されていないドキュメントは(別のドキュメントと取り違えないよう)対象外。
+function historyFile(doc) {
+    // 保存されていないドキュメントの fullName は実在しないパスになるので、exists で見分ける
+    var key = safe(function () { return doc.fullName.exists ? doc.fullName.fsName : null; }, null);
+    if (!key) return null;
+    var base = safe(function () { return doc.name; }, "doc").replace(/[^A-Za-z0-9_\-]/g, "_");
+    return new File(getDataFolder("history").fsName + "/" + base + "_" + hashString(key) + ".txt");
+}
+
+// 前回の結果を読む。戻り値: { time:"日時", keys:[...] } または null。
+function loadHistory(doc) {
+    try {
+        var f = historyFile(doc);
+        if (!f || !f.exists) return null;
+        f.encoding = "UTF-8";
+        f.open("r");
+        var text = f.read();
+        f.close();
+        var lines = text.split("\n");
+        var time = lines[0].replace(/^#\s*/, "").replace(/\r$/, "");
+        var keys = [];
+        for (var i = 1; i < lines.length; i++) {
+            var line = lines[i].replace(/\r$/, "");
+            if (line !== "") keys.push(line);
+        }
+        return { time: time, keys: keys };
+    } catch (e) {
+        return null;
+    }
+}
+
+function saveHistory(doc, keys) {
+    try {
+        var f = historyFile(doc);
+        if (!f) return false;
+        f.encoding = "UTF-8";
+        f.open("w");
+        f.write("# " + nowString() + "\n" + joinArr(keys, "\n"));
+        f.close();
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// フォルダ直下の .ai ファイル(名前順)。
+function listAiFiles(folder) {
+    var files = folder.getFiles(function (f) { return (f instanceof File) && /\.ai$/i.test(f.name); });
+    files.sort(function (a, b) {
+        var x = a.name.toLowerCase(), y = b.name.toLowerCase();
+        return x < y ? -1 : (x > y ? 1 : 0);
+    });
+    return files;
 }
 
 // パスが軸並行の矩形(4点、直線のみ)かどうかを簡易判定
@@ -2492,9 +2739,10 @@ CHECKS.empty_object = function (doc, cfg, ctx) {
 function runPreflight(doc, cfg, progressCb) {
     IMAGE_INFO_CACHE = {}; // 画像ヘッダキャッシュを実行ごとにリセット
     if (progressCb) progressCb(0, "ドキュメントを走査中...");
+    var ignoreNames = parseNameList(cfg.ignoreLayers);
     var items = scanDocument(doc, function (n) {
         if (progressCb) progressCb(Math.min(40, n / 20), "オブジェクトを走査中... (" + n + "件)");
-    });
+    }, ignoreNames);
 
     var artboardTrims = [];
     for (var i = 0; i < doc.artboards.length; i++) {
@@ -2537,7 +2785,89 @@ function runPreflight(doc, cfg, progressCb) {
     } else {
         results.finishSizeText = "";
     }
+
+    // アートボードごとの絞り込み用に、検出ごとに属するアートボード番号(0始まり。範囲外・参照なしは null)を付ける
+    for (var ri = 0; ri < results.length; ri++) {
+        var dets = results[ri].details;
+        for (var di = 0; di < dets.length; di++) {
+            var itm = dets[di].item;
+            dets[di].ab = itm ? findContainingArtboard(doc, safe(function () { return itm.geometricBounds; }, null)) : null;
+        }
+    }
+
+    // 除外したレイヤーの記録(結果画面・レポートに「何を除いて検版したか」を残す)
+    results.ignoredNote = "";
+    if (items.ignoredLayers && items.ignoredLayers.length > 0) {
+        var ignParts = [];
+        for (var ig = 0; ig < items.ignoredLayers.length; ig++) {
+            ignParts.push(items.ignoredLayers[ig].name + "(" + items.ignoredLayers[ig].count + ")");
+        }
+        results.ignoredNote = "除外したレイヤー: " + joinArr(ignParts, "、");
+    }
+
+    // 前回の結果との比較(画面から実行したときだけ)。比較のあと、今回の結果を保存する。
+    results.compareNote = "";
+    if (RUN_OPTS.history) {
+        var curKeys = detectionKeys(results);
+        var prev = loadHistory(doc);
+        if (prev) {
+            var cmp = compareDetections(prev.keys, curKeys);
+            var addedSet = {};
+            for (var ak = 0; ak < cmp.added.length; ak++) addedSet["k:" + cmp.added[ak]] = true;
+            for (var rj = 0; rj < results.length; rj++) {
+                var rr = results[rj];
+                if (rr.status !== "NG" && rr.status !== "WARN" && rr.status !== "INFO") continue;
+                for (var dj = 0; dj < rr.details.length; dj++) {
+                    var dkey = rr.id + "\t" + String(rr.details[dj].text).replace(/[\r\n]+/g, " ");
+                    if (addedSet["k:" + dkey]) rr.details[dj].text = "【新規】" + rr.details[dj].text;
+                }
+            }
+            results.compareNote = "前回(" + prev.time + ")との比較: 解消 " + cmp.resolved.length + "件 / 新規 " + cmp.added.length + "件 / 変わらず " + cmp.same + "件";
+        }
+        saveHistory(doc, curKeys);
+    }
     return results;
+}
+
+// フォルダ内の .ai ファイルを順に開いて検版し、結果の行を返す(ファイルは保存・変更しない)。
+// onProgress(i, n, name): 進捗の通知。ESC で中断すると、それまでの結果を aborted:true で返す。
+function runBatch(files, cfg, onProgress) {
+    var rows = [];
+    var aborted = false;
+    var prevLevel = app.userInteractionLevel;
+    var prevHistory = RUN_OPTS.history;
+    RUN_OPTS.history = false;
+    app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+    try {
+        for (var i = 0; i < files.length; i++) {
+            var f = files[i];
+            var name = safe(function () { return decodeURI(f.name); }, "(不明)");
+            if (onProgress) onProgress(i, files.length, name);
+            var d = null;
+            var wasOpen = false;
+            try {
+                throwIfAborted();
+                // 既に開いているファイルは、検版後に閉じない(ユーザーの作業中のドキュメントを閉じないため)
+                for (var oi = 0; oi < app.documents.length; oi++) {
+                    if (safe(function () { return app.documents[oi].fullName.fsName; }, "") === f.fsName) wasOpen = true;
+                }
+                d = app.open(f);
+                var res = runPreflight(d, cfg, null);
+                var statuses = {};
+                for (var k = 0; k < res.length; k++) statuses[res[k].id] = res[k].status;
+                rows.push({ name: name, error: "", summary: summarizeResults(res), statuses: statuses });
+            } catch (e) {
+                if (isAbortError(e)) { aborted = true; break; }
+                rows.push({ name: name, error: e.toString(), summary: null, statuses: {} });
+            } finally {
+                if (d && !wasOpen) { try { d.close(SaveOptions.DONOTSAVECHANGES); } catch (e2) {} }
+            }
+        }
+    } finally {
+        app.userInteractionLevel = prevLevel;
+        RUN_OPTS.history = prevHistory;
+    }
+    return { rows: rows, aborted: aborted };
 }
 
 function summarizeResults(results) {
@@ -2595,6 +2925,8 @@ function buildHtmlReport(doc, cfg, results, summary) {
     if (results.finishSizeText) {
         html += "<p>検出した仕上がりサイズ: <b>" + escapeHtml(results.finishSizeText) + "</b></p>\n";
     }
+    if (results.ignoredNote) html += "<p>" + escapeHtml(results.ignoredNote) + "</p>\n";
+    if (results.compareNote) html += "<p>" + escapeHtml(results.compareNote) + "</p>\n";
 
     html += "<h2>設定値</h2>\n<table>\n";
     html += "<tr><th>仕上がりサイズ</th><td>" + escapeHtml(SIZE_PRESET_LABELS[cfg.sizeKey]) + (cfg.sizeKey === "CUSTOM" ? " (" + cfg.customWidthMM + "×" + cfg.customHeightMM + "mm)" : "") + " ±" + cfg.sizeToleranceMM + "mm</td></tr>\n";
@@ -2647,6 +2979,8 @@ function buildCsvReport(doc, cfg, results) {
     var lines = [];
     // ファイル冒頭のメタ情報欄(ツールバージョン等)。1列のみの行として先頭に付与する。
     lines.push(escapeCsv("# DigitalKenpan v" + KENPAN_VERSION + " / ファイル名: " + doc.name + " / 出力日時: " + nowString()));
+    if (results.ignoredNote) lines.push(escapeCsv("# " + results.ignoredNote));
+    if (results.compareNote) lines.push(escapeCsv("# " + results.compareNote));
     lines.push(joinArr([escapeCsv("カテゴリ"), escapeCsv("項目"), escapeCsv("判定"), escapeCsv("概要"), escapeCsv("検出内容"), escapeCsv("原因と対応"), escapeCsv("備考")], ","));
     for (var i = 0; i < results.length; i++) {
         var r = results[i];
@@ -2954,6 +3288,7 @@ function buildAndShowDialog() {
     settingsBtnGroup.alignment = "left";
     var loadBtn = settingsBtnGroup.add("button", undefined, "設定を読込");
     var saveBtn = settingsBtnGroup.add("button", undefined, "設定を保存");
+    var batchBtn = settingsBtnGroup.add("button", undefined, "フォルダを一括検版…");
     var cancelBtn = settingsBtnGroup.add("button", undefined, "キャンセル", { name: "cancel" });
     var runBtn = settingsBtnGroup.add("button", undefined, "検版実行", { name: "ok" });
     // ESC=キャンセル / Enter=検版実行
@@ -3372,6 +3707,41 @@ function buildAndShowDialog() {
     settingsHScrollbar.onChanging = applySettingsContentScrollLocation;
     settingsHScrollbar.onChange = applySettingsContentScrollLocation;
 
+    // --- 入稿先プリセット(設定一式に名前を付けて保存・呼び出し) ---
+    var presetGroup = settingsContent.add("panel", undefined, "入稿先プリセット");
+    presetGroup.orientation = "row";
+    presetGroup.alignChildren = ["left", "center"];
+    applyPanelBackdrop(presetGroup);
+    presetGroup.add("statictext", undefined, "プリセット:");
+    var presetDropdown = presetGroup.add("dropdownlist", undefined, []);
+    presetDropdown.preferredSize.width = 220;
+    var presetApplyBtn = presetGroup.add("button", undefined, "適用");
+    var presetSaveBtn = presetGroup.add("button", undefined, "現在の設定を名前を付けて保存…");
+    var presetDeleteBtn = presetGroup.add("button", undefined, "削除");
+
+    function refreshPresetList(selectName) {
+        presetDropdown.removeAll();
+        var names = listPresetNames();
+        if (names.length === 0) {
+            presetDropdown.add("item", "(保存済みのプリセットはありません)");
+            presetDropdown.selection = 0;
+            presetDropdown.enabled = false;
+            presetApplyBtn.enabled = false;
+            presetDeleteBtn.enabled = false;
+            return;
+        }
+        presetDropdown.enabled = true;
+        presetApplyBtn.enabled = true;
+        presetDeleteBtn.enabled = true;
+        var idx = 0;
+        for (var pn = 0; pn < names.length; pn++) {
+            presetDropdown.add("item", names[pn]);
+            if (names[pn] === selectName) idx = pn;
+        }
+        presetDropdown.selection = idx;
+    }
+    refreshPresetList("");
+
     // --- 仕上がりサイズ ---
     var sizeGroup = settingsContent.add("panel", undefined, "仕上がりサイズ");
     sizeGroup.orientation = "row";
@@ -3466,6 +3836,10 @@ function buildAndShowDialog() {
     numRow4.add("statictext", undefined, "薄アミ濃度閾値(%):");
     var lightInkField = numRow4.add("edittext", undefined, String(cfg.lightInkPercent)); lightInkField.characters = 5;
 
+    var numRow5 = numGroup.add("group");
+    numRow5.add("statictext", undefined, "検版から除外するレイヤー名(カンマ区切り。サブレイヤーも除外):");
+    var ignoreLayersField = numRow5.add("edittext", undefined, String(cfg.ignoreLayers || "")); ignoreLayersField.characters = 28;
+
     // --- チェック項目ON/OFF ---
     var checkPanel = settingsContent.add("panel", undefined, "チェック項目");
     checkPanel.orientation = "row";
@@ -3516,6 +3890,7 @@ function buildAndShowDialog() {
         c.maxObjectCount = parseFloat(objCountField.text); if (isNaN(c.maxObjectCount)) c.maxObjectCount = 100000;
         c.thinLinePt = parseFloat(thinLineField.text); if (isNaN(c.thinLinePt)) c.thinLinePt = 0.5;
         c.lightInkPercent = parseFloat(lightInkField.text); if (isNaN(c.lightInkPercent)) c.lightInkPercent = 20;
+        c.ignoreLayers = String(ignoreLayersField.text || "");
         for (var id2 in checkBoxes) { if (checkBoxes.hasOwnProperty(id2)) c.checks[id2] = checkBoxes[id2].value; }
         return c;
     }
@@ -3539,6 +3914,7 @@ function buildAndShowDialog() {
         objCountField.text = String(c.maxObjectCount);
         thinLineField.text = String(c.thinLinePt);
         lightInkField.text = String(c.lightInkPercent);
+        ignoreLayersField.text = String(c.ignoreLayers || "");
         for (var id3 in checkBoxes) { if (checkBoxes.hasOwnProperty(id3)) checkBoxes[id3].value = c.checks[id3]; }
         updateCustomEnabled();
     }
@@ -3554,6 +3930,85 @@ function buildAndShowDialog() {
     loadBtn.onClick = function () {
         var c = loadConfig();
         applyConfigToUI(c);
+    };
+
+    presetApplyBtn.onClick = function () {
+        if (!presetDropdown.selection || !presetDropdown.enabled) return;
+        var pc = loadPresetConfig(presetDropdown.selection.text);
+        if (!pc) { alert("プリセットを読み込めませんでした。"); return; }
+        applyConfigToUI(pc);
+    };
+    presetSaveBtn.onClick = function () {
+        var raw = prompt("プリセット名を入力してください(例: ○○印刷 オフセット)。同じ名前は上書きされます。", "");
+        if (raw === null) return;
+        var pname = sanitizePresetName(raw);
+        if (!pname) { alert("プリセット名が空です。"); return; }
+        if (presetFile(pname).exists && !confirm("「" + pname + "」は既にあります。上書きしますか?")) return;
+        if (savePresetConfig(pname, collectConfigFromUI())) {
+            refreshPresetList(pname);
+        } else {
+            alert("プリセットの保存に失敗しました。");
+        }
+    };
+    presetDeleteBtn.onClick = function () {
+        if (!presetDropdown.selection || !presetDropdown.enabled) return;
+        var dn = presetDropdown.selection.text;
+        if (!confirm("プリセット「" + dn + "」を削除しますか?")) return;
+        deletePreset(dn);
+        refreshPresetList("");
+    };
+
+    // フォルダ内の .ai を順に開いて、今の設定で検版する(ファイルは保存・変更しない)
+    batchBtn.onClick = function () {
+        var bc = collectConfigFromUI();
+        var bfolder = Folder.selectDialog("検版する .ai ファイルのあるフォルダを選択してください");
+        if (!bfolder) return;
+        var bfiles = listAiFiles(bfolder);
+        if (bfiles.length === 0) { alert("このフォルダ直下に .ai ファイルがありません。"); return; }
+        if (!confirm(bfiles.length + "個のファイルを順に開いて検版します(ファイルは保存・変更しません)。\n" +
+            "中断するには ESC キーを押し続けてください。よろしいですか?")) return;
+        ABORT_FLAG.on = false;
+        var titleBefore = win.text;
+        var br = null;
+        try {
+            br = runBatch(bfiles, bc, function (i, n, name) {
+                win.text = "一括検版中… (" + (i + 1) + "/" + n + ") " + name;
+                try { win.update(); } catch (eU) {}
+            });
+        } finally {
+            win.text = titleBefore;
+            try { doc.activate(); } catch (eA) {}
+        }
+        var okN = 0, warnN = 0, ngN = 0, errN = 0, sumLines = [];
+        for (var bi = 0; bi < br.rows.length; bi++) {
+            var row = br.rows[bi];
+            var label;
+            if (row.error) { errN++; label = "検版できませんでした"; }
+            else {
+                label = batchOverall(row.summary);
+                if (label === "OK") okN++; else if (label === "警告あり") warnN++; else ngN++;
+            }
+            if (bi < 15) sumLines.push(row.name + " … " + label);
+        }
+        if (br.rows.length > 15) sumLines.push("…ほか" + (br.rows.length - 15) + "件(CSVを参照)");
+        var csvText = buildBatchCsv(br.rows, getCheckIdOrder());
+        var csvFile = new File(bfolder.fsName + "/一括検版_" + nowFileStamp() + ".csv");
+        var csvWhere = "";
+        try {
+            writeTextFileUTF8BOM(csvFile, csvText);
+            csvWhere = csvFile.fsName;
+        } catch (eW) {
+            try {
+                csvFile = new File(getDataFolder("batch").fsName + "/一括検版_" + nowFileStamp() + ".csv");
+                writeTextFileUTF8BOM(csvFile, csvText);
+                csvWhere = csvFile.fsName;
+            } catch (eW2) {
+                csvWhere = "(CSVを保存できませんでした)";
+            }
+        }
+        alert("一括検版" + (br.aborted ? "(途中で中断)" : "が完了") + ": " + br.rows.length + "/" + bfiles.length + "件\n" +
+            "OK " + okN + " / 警告あり " + warnN + " / エラーあり " + ngN + (errN > 0 ? " / 検版できず " + errN : "") + "\n\n" +
+            joinArr(sumLines, "\n") + "\n\nCSV: " + csvWhere);
     };
 
     // ============================= 結果パネル =============================
@@ -3574,6 +4029,9 @@ function buildAndShowDialog() {
     summaryText.graphics.font = ScriptUI.newFont("dialog", "Bold", 18);
     var finishSizeText = resultPanel.add("statictext", undefined, "");
     finishSizeText.graphics.font = ScriptUI.newFont("dialog", "Bold", 12);
+    // 前回との比較・除外したレイヤーの注記(あるときだけ文字が入る)
+    var runNoteText = resultPanel.add("statictext", undefined, "");
+    runNoteText.preferredSize = [760, 18];
 
     var progressGroup = resultPanel.add("group");
     progressGroup.orientation = "column";
@@ -3760,6 +4218,14 @@ function buildAndShowDialog() {
     selectBtnGroup.alignment = ["fill", "top"];
     var selectBtn = selectBtnGroup.add("button", undefined, "選択してズーム");
     selectBtnGroup.add("statictext", undefined, "(行のダブルクリックでもジャンプします)");
+    // アートボードが複数あるときだけ、一覧を1つのアートボードに絞り込める
+    var abFilterIndex = -1; // -1=すべて
+    var abFilterDropdown = selectBtnGroup.add("dropdownlist", undefined, []);
+    abFilterDropdown.add("item", "全アートボード");
+    var abCountForFilter = safe(function () { return doc.artboards.length; }, 1);
+    for (var abf = 0; abf < abCountForFilter; abf++) abFilterDropdown.add("item", "アートボード" + (abf + 1));
+    abFilterDropdown.selection = 0;
+    abFilterDropdown.visible = abCountForFilter > 1;
 
     var noteText = listContainer.add("statictext", undefined, "", { multiline: true });
     // 【v1.18.0】長い「原因と対応」の説明文が高さ不足で途中から見切れることがあったため、
@@ -4225,6 +4691,15 @@ function buildAndShowDialog() {
         var noteParts = [];
         if (r.advice && r.status !== "OK" && r.status !== "SKIP") noteParts.push("【原因と対応】" + r.advice);
         if (r.note) noteParts.push(r.note);
+        // アートボードで絞り込み中は、他のアートボードの検出を隠す(アートボード不明のものは常に表示)
+        var hiddenByAb = 0;
+        if (abFilterIndex >= 0) {
+            for (var hb = 0; hb < r.details.length; hb++) {
+                var hab = r.details[hb].ab;
+                if (hab !== undefined && hab !== null && hab !== abFilterIndex) hiddenByAb++;
+            }
+            if (hiddenByAb > 0) noteParts.push("(アートボード" + (abFilterIndex + 1) + "に絞り込み中: ほか" + hiddenByAb + "件を非表示)");
+        }
         var noteFullText = joinArr(noteParts, "\n");
         noteText.text = noteFullText;
         // 【v1.19.0→v1.20.0】固定高さでは項目ごとの文章量の差で必ずどこかが見切れるため、
@@ -4264,9 +4739,16 @@ function buildAndShowDialog() {
             " テキスト長=" + noteFullText.length + "文字" +
             " テキスト内容(先頭50文字)=" + noteFullText.substring(0, 50) + "...");
         for (var i = 0; i < r.details.length; i++) {
+            if (abFilterIndex >= 0 && r.details[i].ab !== undefined && r.details[i].ab !== null && r.details[i].ab !== abFilterIndex) {
+                continue;
+            }
             var li = detailList.add("item", r.details[i].text);
             li.itemRef = r.details[i].item;
         }
+    };
+    abFilterDropdown.onChange = function () {
+        abFilterIndex = abFilterDropdown.selection ? abFilterDropdown.selection.index - 1 : -1;
+        tree.onChange();
     };
 
     // 【v1.37.0→v1.38.0】tree.onDoubleClick(ダブルクリック時の打ち消しロジック)、および
@@ -4369,6 +4851,10 @@ function buildAndShowDialog() {
             1
         );
         finishSizeText.text = results.finishSizeText ? ("検出した仕上がりサイズ: " + results.finishSizeText) : "";
+        var runNoteParts = [];
+        if (results.compareNote) runNoteParts.push(results.compareNote);
+        if (results.ignoredNote) runNoteParts.push(results.ignoredNote);
+        runNoteText.text = joinArr(runNoteParts, "  /  ");
         populateTree(results);
         win.text = TITLE_RESULT_PREFIX + doc.name;
         // 【v1.17.0・監査済み】ここは画面切替(設定→結果)の1回限りのタイミングであり、
@@ -4434,6 +4920,7 @@ function buildAndShowDialog() {
         }, null);
         summaryText.text = "検査中...(ESCキーで中断できます)";
         finishSizeText.text = "";
+        runNoteText.text = "";
         selStatusText.text = "";
         resultBody.visible = false;
         resultBtnGroup.visible = false;
@@ -4459,6 +4946,7 @@ function buildAndShowDialog() {
         var wasAborted = false;
         var runError = null;
         try {
+            RUN_OPTS.history = true; // 画面から実行したときだけ、前回との比較と今回の結果の保存を行う
             results = runPreflight(doc, c, function (pct, label) {
                 if (pct !== null && pct !== undefined) progressBar.value = pct;
                 if (label !== null && label !== undefined) {
@@ -4491,6 +4979,7 @@ function buildAndShowDialog() {
         }
 
         // finally相当の後始末: どのルートでも必ずUI状態を復元する
+        RUN_OPTS.history = false;
         progressGroup.visible = false;
         // 【v1.28.0で試行→効果なし→v1.29.0で確定原因への再対処。詳細はshowResultsScreen内の
         // 同種コメント参照】非表示に戻すと同時にprogressGroup自体の高さ制約を0へ強制することで、
