@@ -12,6 +12,7 @@ const k = load({
     'matrixScale', 'calcRasterEffectiveDPI', 'calcPlacedEffectiveDPI',
     'makeResult', 'statusLabelOf', 'detailItem', 'summarizeResults', 'buildCsvReport',
     'truncateForProgress', 'estimateTextBoxHeight',
+    'scaleDistortion', 'matrixSkew', 'linkNameIssues', 'linkLocationIssue', 'isPureBlackCMYK', 'sizeOutliers',
   ],
 });
 

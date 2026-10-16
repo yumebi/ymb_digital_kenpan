@@ -20,7 +20,7 @@
 
 // バージョン表示用。修正のたびにこの値を更新する運用とする。
 // (タイトルバー・HTML/CSVレポートのメタ情報欄に表示される)
-var KENPAN_VERSION = "1.41.1";
+var KENPAN_VERSION = "1.42.0";
 
 // 【v1.16.0・確定原因への対処】Windows実機ログで、win.onResizeが再入(reentrant)して
 // 無限ループ・ウィンドウ幅の際限ない自動増加に陥ることが確定した。
@@ -414,7 +414,13 @@ function defaultConfig() {
             overprint: true,
             hairline: true,
             raster_effect_res: true,
-            unwanted: true
+            unwanted: true,
+            artboard_size_consistency: true,
+            black_overprint: true,
+            unused_spot: true,
+            link_filename: true,
+            image_aspect: true,
+            empty_object: true
         }
     };
 }
@@ -538,11 +544,11 @@ function loadConfig() {
 
 function getCheckIdOrder() {
     return [
-        "size_match", "bleed", "tombo",
+        "size_match", "artboard_size_consistency", "bleed", "tombo",
         "font_outline", "text_margin",
-        "rgb_mix", "spot_color", "ink_total", "rich_black", "gray_usage", "spot_quality", "artboard_colors", "blank_artboard",
-        "image_missing", "image_colormode", "image_resolution",
-        "transparency", "gradient_mesh", "pattern_usage", "object_count", "thin_light_line",
+        "rgb_mix", "spot_color", "ink_total", "rich_black", "black_overprint", "gray_usage", "spot_quality", "unused_spot", "artboard_colors", "blank_artboard",
+        "image_missing", "link_filename", "image_colormode", "image_resolution", "image_aspect",
+        "transparency", "gradient_mesh", "pattern_usage", "object_count", "thin_light_line", "empty_object",
         "overprint", "hairline", "raster_effect_res", "unwanted"
     ];
 }
@@ -597,6 +603,18 @@ var CHECK_META = {
         advice: "0.25pt未満の線は印刷でかすれたり飛んだりします。0.3pt以上を目安に設定してください。" },
     raster_effect_res: { category: "その他",         name: "ラスタライズ効果解像度",
         advice: "ラスタライズ効果解像度が低いと、ドロップシャドウ・ぼかし等が粗く出力されます。[効果]>[ドキュメントのラスタライズ効果設定]で300ppi以上にしてください。" },
+    artboard_size_consistency: { category: "サイズとトンボ", name: "アートボードサイズの統一",
+        advice: "アートボードごとに仕上がりサイズが違うと、面付けや断裁の設定を取り違える原因になります。表紙と本文のように意図的に分けている場合を除き、サイズを揃えてください。" },
+    black_overprint:   { category: "カラー",         name: "スミ(K100)のオーバープリント",
+        advice: "小さな文字や細線のスミ(K100)が、下の色を抜く設定(ノセになっていない)だと、見当ズレで白いフチが出ます。スミ文字・細線はオーバープリント(ノセ)にしてください。印刷会社が自動でノセ処理する運用の場合は対応不要です。" },
+    unused_spot:       { category: "カラー",         name: "未使用の特色",
+        advice: "使っていない特色がスウォッチに残っていると、分版の出力で余計な版(空の版)が出る原因になります。不要なら[スウォッチ]パネルから削除してください(シンボル・パターン内で使っている場合は削除しないでください)。" },
+    link_filename:     { category: "画像",           name: "リンク画像のファイル名・場所",
+        advice: "ファイル名に空白・全角・記号が含まれると、環境が違う印刷所のMac/Windowsでリンク切れや文字化けの原因になります。また、デスクトップ・一時フォルダ・クラウド・ネットワーク上の画像は、入稿データを集めるときに取りこぼしやすくなります。半角英数字の名前にして、入稿用フォルダにまとめてください。" },
+    image_aspect:      { category: "画像",           name: "画像の縦横比(歪み)",
+        advice: "画像の縦横の拡大率が違う(縦横比が崩れている)と、写真が歪んで印刷されます。意図したものでなければ、画像を等倍率で拡大縮小し直してください。" },
+    empty_object:      { category: "オブジェクト・効果", name: "塗り・線なしのオブジェクト",
+        advice: "塗りも線もない(見えない)オブジェクトは、画面には出ませんが、データに残ったまま出力され、トラブルや容量増加の原因になります。不要であれば削除してください(クリッピングマスクのパスは除きます)。" },
     unwanted:          { category: "その他",         name: "不要オブジェクト",
         advice: "非表示・アートボード外・孤立点などの不要オブジェクトは事故や誤出力の原因になります。入稿前に削除するか、意図的なものか確認してください。" }
 };
@@ -995,6 +1013,81 @@ function centerInside(inner, outer) {
     var cx = (inner[0] + inner[2]) / 2;
     var cy = (inner[1] + inner[3]) / 2;
     return (cx >= outer[0] && cx <= outer[2] && cy <= outer[1] && cy >= outer[3]);
+}
+
+// 配置画像などの縦横の拡大率の違い。sx, sy は横・縦の拡大率。
+// 戻り値は、大きいほうに対する差の割合(0=縦横が同じ倍率、0.2=一方が他方より20%小さい)。
+function scaleDistortion(sx, sy) {
+    var big = Math.max(sx, sy);
+    if (!(big > 0)) return 0;
+    return Math.abs(sx - sy) / big;
+}
+
+// 行列の傾斜(シアー)の大きさ。0 なら縦横が直交している(画像が斜めに引き伸ばされていない)。
+function matrixSkew(m) {
+    var sx = Math.sqrt(m.mValueA * m.mValueA + m.mValueB * m.mValueB);
+    var sy = Math.sqrt(m.mValueC * m.mValueC + m.mValueD * m.mValueD);
+    if (!(sx > 0) || !(sy > 0)) return 0;
+    return Math.abs(m.mValueA * m.mValueC + m.mValueB * m.mValueD) / (sx * sy);
+}
+
+// リンク画像のファイル名の問題点(文字列の配列。問題が無ければ空)。
+// 環境の違う印刷所でリンク切れ・文字化けの原因になりやすいものを挙げる。
+function linkNameIssues(name) {
+    var issues = [];
+    if (!name) return issues;
+    if (/\s/.test(name)) issues.push("空白を含む");
+    if (/[^\x00-\x7F]/.test(name)) issues.push("全角・日本語などASCII以外の文字を含む");
+    if (/[&<>"'\/\\%#;:*?|]/.test(name)) issues.push("記号を含む(& < > \" ' / \\ % # ; : * ? |)");
+    if (name.charAt(0) === ".") issues.push("先頭がドット");
+    return issues;
+}
+
+// リンク画像の置き場所の問題点(1つ。無ければ空文字)。入稿データを集めるときに取りこぼしやすい場所。
+function linkLocationIssue(fsName) {
+    if (!fsName) return "";
+    var p = String(fsName).replace(/\\/g, "/");
+    var lower = p.toLowerCase();
+    if (/^\/\/[^\/]/.test(p)) return "ネットワーク上(共有フォルダ)";
+    if (/\/appdata\/local\/temp\//.test(lower) || /\/temp\//.test(lower) || /^\/tmp\//.test(lower) ||
+        /^\/private\/var\/folders\//.test(lower) || /^\/var\/folders\//.test(lower)) return "一時フォルダ";
+    if (/^\/volumes\//.test(lower)) return "外付けドライブ(別ボリューム)";
+    if (/\/(onedrive|dropbox|google ?drive|icloud)/.test(lower)) return "クラウド同期フォルダ";
+    if (/\/desktop\//.test(lower)) return "デスクトップ";
+    if (/\/downloads\//.test(lower)) return "ダウンロードフォルダ";
+    return "";
+}
+
+// スミ(K100)か。C/M/Y がほぼ0で、Kがほぼ100。
+function isPureBlackCMYK(c, m, y, k) {
+    return k >= 95 && c <= 2 && m <= 2 && y <= 2;
+}
+
+// アートボードごとの仕上がりサイズ(mm)のうち、多数派と違うものを探す。
+// sizes: [[w,h], ...]。縦横の入れ替えと許容差(tol)は同じ大きさとみなす。
+// 戻り値: { base:[w,h], mismatches:[アートボードの番号(0始まり)...] }(サイズが無ければ base は null)
+function sizeOutliers(sizes, tol) {
+    var groups = []; // { size, indexes }
+    for (var i = 0; i < sizes.length; i++) {
+        var found = null;
+        for (var g = 0; g < groups.length; g++) {
+            if (sizeMatches(sizes[i][0], sizes[i][1], groups[g].size[0], groups[g].size[1], tol)) { found = groups[g]; break; }
+        }
+        if (found) found.indexes.push(i);
+        else groups.push({ size: sizes[i], indexes: [i] });
+    }
+    if (groups.length === 0) return { base: null, mismatches: [] };
+    var best = groups[0];
+    for (var b = 1; b < groups.length; b++) {
+        if (groups[b].indexes.length > best.indexes.length) best = groups[b];
+    }
+    var out = [];
+    for (var n = 0; n < sizes.length; n++) {
+        var inBest = false;
+        for (var k = 0; k < best.indexes.length; k++) { if (best.indexes[k] === n) { inBest = true; break; } }
+        if (!inBest) out.push(n);
+    }
+    return { base: best.size, mismatches: out };
 }
 
 // パスが軸並行の矩形(4点、直線のみ)かどうかを簡易判定
@@ -2156,6 +2249,240 @@ CHECKS.unwanted = function (doc, cfg, ctx) {
     var status = count > 0 ? "WARN" : "OK";
     var summary = count > 0 ? (count + "件 要確認") : "不要オブジェクトは検出されませんでした";
     return makeResult("unwanted", status, summary, details, "意図的な配置(作業用メモ等)の場合もあるため、すべて「要確認」扱いとしています。");
+};
+
+// --- 9.16 アートボードサイズの統一 ---
+CHECKS.artboard_size_consistency = function (doc, cfg, ctx) {
+    if (ctx.artboardTrims.length < 2) {
+        return makeResult("artboard_size_consistency", "SKIP", "-(アートボードが1つ)", [], "");
+    }
+    var sizes = [];
+    for (var i = 0; i < ctx.artboardTrims.length; i++) sizes.push(ctx.artboardTrims[i].sizeMM);
+    var res = sizeOutliers(sizes, cfg.sizeToleranceMM);
+    var details = [];
+    for (var m = 0; m < res.mismatches.length; m++) {
+        var idx = res.mismatches[m];
+        details.push(detailItem("アートボード" + (idx + 1) + "(" + doc.artboards[idx].name + "): " +
+            fmt(sizes[idx][0], 1) + "×" + fmt(sizes[idx][1], 1) + "mm(多数派は " + fmt(res.base[0], 1) + "×" + fmt(res.base[1], 1) + "mm)", null));
+    }
+    var status = details.length > 0 ? "WARN" : "OK";
+    var summary = details.length > 0 ? (details.length + "件 他と違うサイズ") : ("全" + sizes.length + "アートボードが同じサイズ(" + fmt(res.base[0], 1) + "×" + fmt(res.base[1], 1) + "mm)");
+    return makeResult("artboard_size_consistency", status, summary, details, "表紙と本文など、意図的にサイズを分けている場合は問題ありません。仕上がり枠を自動検出したサイズで比べています。");
+};
+
+// --- 9.17 スミ(K100)のオーバープリント ---
+CHECKS.black_overprint = function (doc, cfg, ctx) {
+    var details = [];
+    var warnCount = 0;
+
+    var isK100 = function (col) {
+        if (colorTypeName(col) !== "CMYKColor") return false;
+        return safe(function () { return isPureBlackCMYK(col.cyan, col.magenta, col.yellow, col.black); }, false);
+    };
+
+    for (var i = 0; i < ctx.items.length; i++) {
+        var rec = ctx.items[i];
+        if (rec.hiddenInherited || rec.hiddenSelf) continue;
+        var item = rec.item;
+        var tn = rec.typename;
+        var fillColor, strokeColor, fillOP, strokeOP, isFilled, isStroked;
+        if (tn === "TextFrame") {
+            var attrs = safe(function () { return item.textRange.characterAttributes; }, null);
+            if (!attrs) continue;
+            fillColor = safe(function () { return attrs.fillColor; }, null);
+            strokeColor = safe(function () { return attrs.strokeColor; }, null);
+            fillOP = safe(function () { return attrs.overprintFill; }, null);
+            strokeOP = safe(function () { return attrs.overprintStroke; }, null);
+            isFilled = safe(function () { return attrs.fillColor !== undefined && colorTypeName(attrs.fillColor) !== "NoColor"; }, false);
+            isStroked = false; // 文字の線はほとんど使われないので対象にしない
+        } else if (tn === "PathItem") {
+            fillColor = safe(function () { return item.fillColor; }, null);
+            strokeColor = safe(function () { return item.strokeColor; }, null);
+            fillOP = safe(function () { return item.fillOverprint; }, null);
+            strokeOP = safe(function () { return item.strokeOverprint; }, null);
+            isFilled = safe(function () { return item.filled; }, false);
+            isStroked = safe(function () { return item.stroked; }, false);
+        } else {
+            continue;
+        }
+
+        var fillMiss = isFilled && isK100(fillColor) && fillOP === false;
+        var strokeMiss = isStroked && isK100(strokeColor) && strokeOP === false;
+        if (!fillMiss && !strokeMiss) continue;
+
+        // 「小さい/細い」判定(リッチブラックの判定と同じ基準): テキスト、2pt以下の線、約1000mm²未満の塗り
+        var isSmall = false;
+        if (tn === "TextFrame") {
+            isSmall = true;
+        } else if (strokeMiss) {
+            var sw = safe(function () { return item.strokeWidth; }, 999);
+            if (sw <= 2) isSmall = true;
+        }
+        if (!isSmall && fillMiss) {
+            var gb = rec.geometricBounds;
+            if (gb) {
+                var areaMM2 = pt2mm(gb[2] - gb[0]) * pt2mm(gb[1] - gb[3]);
+                if (areaMM2 < 1000) isSmall = true;
+            }
+        }
+        // 大きな面積のスミベタは、下を抜く(ノックアウト)のが普通なので対象にしない
+        if (!isSmall) continue;
+
+        warnCount++;
+        var what = tn === "TextFrame" ? "文字" : (strokeMiss && !fillMiss ? "細線" : "小さな塗り");
+        details.push(detailItem("スミ(K100)の" + what + "がオーバープリント(ノセ)になっていません: " + describeItem(rec, doc), item));
+    }
+    var status = warnCount > 0 ? "WARN" : "OK";
+    var summary = warnCount > 0 ? (warnCount + "件 要確認") : "スミ(K100)の小さな文字・細線にノセ漏れなし";
+    return makeResult("black_overprint", status, summary, details, "判定基準: K95%以上でC/M/Yがほぼ0のスミで、文字・2pt以下の線・約1000mm²未満の塗りを対象にしています。印刷会社が自動でノセ処理する運用の場合は対応不要です。");
+};
+
+// --- 9.18 未使用の特色 ---
+CHECKS.unused_spot = function (doc, cfg, ctx) {
+    var spots = safe(function () { return doc.spots; }, null);
+    if (!spots) {
+        return makeResult("unused_spot", "WARN", "特色情報を取得できませんでした", [], "要確認としています。");
+    }
+    var used = {};
+    var mark = function (color) {
+        var t = colorTypeName(color);
+        if (t === "SpotColor") {
+            var n = safe(function () { return color.spot.name; }, null);
+            if (n !== null) used[n] = true;
+        } else if (t === "GradientColor") {
+            checkGradientColors(color, null, doc, mark);
+        }
+    };
+    for (var i = 0; i < ctx.items.length; i++) {
+        var rec = ctx.items[i];
+        var item = rec.item;
+        var tn = rec.typename;
+        if (tn === "PathItem") {
+            mark(safe(function () { return item.fillColor; }, null));
+            mark(safe(function () { return item.strokeColor; }, null));
+        } else if (tn === "CompoundPathItem") {
+            var first = safe(function () { return item.pathItems[0]; }, null);
+            if (first) {
+                mark(safe(function () { return first.fillColor; }, null));
+                mark(safe(function () { return first.strokeColor; }, null));
+            }
+        } else if (tn === "TextFrame") {
+            // 文字ごとに色が違う場合があるので、文字(上限あり)を1つずつ見る
+            var chars = safe(function () { return item.textRange.characters; }, null);
+            if (chars) {
+                var limit = Math.min(chars.length, 1000);
+                for (var c = 0; c < limit; c++) {
+                    var ch = chars[c];
+                    mark(safe(function () { return ch.characterAttributes.fillColor; }, null));
+                    mark(safe(function () { return ch.characterAttributes.strokeColor; }, null));
+                }
+            }
+        }
+    }
+    var details = [];
+    for (var s = 0; s < spots.length; s++) {
+        var sp = spots[s];
+        if (safe(function () { return sp.colorType === ColorModel.REGISTRATION; }, false)) continue;
+        var name = safe(function () { return sp.name; }, null);
+        if (name === null) continue;
+        if (!used[name]) {
+            details.push(detailItem("使われていない特色: 「" + name + "」(スウォッチに定義だけ残っています)", null));
+        }
+    }
+    var status = details.length > 0 ? "WARN" : "OK";
+    var summary = details.length > 0 ? (details.length + "件 未使用の特色") : "未使用の特色なし";
+    return makeResult("unused_spot", status, summary, details, "シンボル・パターン・グラフの内部で使われている特色は検出できないため、削除する前に実際に使っていないか確認してください。");
+};
+
+// --- 9.19 リンク画像のファイル名・場所 ---
+CHECKS.link_filename = function (doc, cfg, ctx) {
+    var details = [];
+    var warnCount = 0, infoCount = 0;
+    var seen = {};
+    for (var i = 0; i < ctx.items.length; i++) {
+        var rec = ctx.items[i];
+        if (rec.typename !== "PlacedItem") continue;
+        var item = rec.item;
+        var file = safe(function () { return item.file; }, null);
+        if (!file) continue;
+        var fsName = safe(function () { return file.fsName; }, "");
+        if (seen[fsName]) continue;   // 同じファイルを何度も配置していても1回だけ報告する
+        seen[fsName] = true;
+        var name = safe(function () { return file.displayName; }, "");
+        if (!name) name = safe(function () { return decodeURI(file.name); }, "");
+        if (!name) name = fsName;
+
+        var nameIssues = linkNameIssues(name);
+        if (nameIssues.length > 0) {
+            warnCount++;
+            details.push(detailItem("ファイル名に問題があります(" + nameIssues.join("、") + "): " + name + " / " + describeItem(rec, doc), item));
+        }
+        var place = linkLocationIssue(fsName);
+        if (place) {
+            infoCount++;
+            details.push(detailItem("[情報] リンク先が" + place + "にあります(入稿データを集めるときに注意): " + name + " / " + describeItem(rec, doc), item));
+        }
+    }
+    var status = warnCount > 0 ? "WARN" : (infoCount > 0 ? "INFO" : "OK");
+    var summary = warnCount > 0 ? (warnCount + "件 ファイル名に問題(情報" + infoCount + "件)") :
+        (infoCount > 0 ? (infoCount + "件 置き場所に注意(情報)") : "リンク画像のファイル名・場所に問題なし");
+    return makeResult("link_filename", status, summary, details, "同じファイルを複数回配置している場合は1回だけ報告します。リンク切れの画像も、ファイル名は確認します。");
+};
+
+// --- 9.20 画像の縦横比(歪み) ---
+CHECKS.image_aspect = function (doc, cfg, ctx) {
+    var TOLERANCE = 0.01; // 1%を超える差を歪みとする(丸め誤差は許容)
+    var details = [];
+    var warnCount = 0;
+    for (var i = 0; i < ctx.items.length; i++) {
+        var rec = ctx.items[i];
+        if (rec.typename !== "PlacedItem" && rec.typename !== "RasterItem") continue;
+        var item = rec.item;
+        var m = safe(function () { return item.matrix; }, null);
+        if (!m) continue;
+        var sc = matrixScale(m);
+        var dist = scaleDistortion(sc[0], sc[1]);
+        var skew = matrixSkew(m);
+        if (dist > TOLERANCE) {
+            warnCount++;
+            details.push(detailItem("縦横の拡大率が違います(横 " + fmt(sc[0] * 100, 1) + "% / 縦 " + fmt(sc[1] * 100, 1) + "%、差 " + fmt(dist * 100, 1) + "%): " + describeItem(rec, doc), item));
+        } else if (skew > TOLERANCE) {
+            warnCount++;
+            details.push(detailItem("画像が斜めに引き伸ばされています(傾斜 " + fmt(skew * 100, 1) + "%): " + describeItem(rec, doc), item));
+        }
+    }
+    var status = warnCount > 0 ? "WARN" : "OK";
+    var summary = warnCount > 0 ? (warnCount + "件 縦横比が崩れた画像") : "縦横比が崩れた画像なし";
+    return makeResult("image_aspect", status, summary, details, "配置マトリクスの縦横の拡大率の差が1%を超えるものを検出しています。意図的に変形した場合は問題ありません。");
+};
+
+// --- 9.21 塗り・線なしのオブジェクト ---
+CHECKS.empty_object = function (doc, cfg, ctx) {
+    var details = [];
+    var count = 0;
+    for (var i = 0; i < ctx.items.length; i++) {
+        var rec = ctx.items[i];
+        if (rec.hiddenSelf || rec.hiddenInherited) continue;   // 非表示は「不要オブジェクト」で報告する
+        var item = rec.item;
+        var tn = rec.typename;
+        var target = null;
+        if (tn === "PathItem") target = item;
+        else if (tn === "CompoundPathItem") target = safe(function () { return item.pathItems[0]; }, null);
+        if (!target) continue;
+
+        var clipping = safe(function () { return target.clipping; }, false);
+        var guide = safe(function () { return target.guides; }, false);
+        if (clipping || guide) continue;   // クリッピングマスクのパス・ガイドは、塗り線が無くて当然
+        var filled = safe(function () { return target.filled; }, null);
+        var stroked = safe(function () { return target.stroked; }, null);
+        if (filled === false && stroked === false) {
+            count++;
+            details.push(detailItem("塗りも線もないオブジェクト: " + describeItem(rec, doc), item));
+        }
+    }
+    var status = count > 0 ? "WARN" : "OK";
+    var summary = count > 0 ? (count + "件 要確認") : "塗り・線なしのオブジェクトなし";
+    return makeResult("empty_object", status, summary, details, "クリッピングマスクのパス、ガイド、非表示のオブジェクトは対象外です(非表示は「不要オブジェクト」で報告します)。");
 };
 
 // -----------------------------------------------------------------------------

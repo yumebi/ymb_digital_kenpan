@@ -64,9 +64,9 @@ test('escapeCsv: = + - @ やタブで始まる値は、数式として評価さ�
   assert.equal(k.escapeCsv('=a,b'), "\"'=a,b\"");
 });
 
-test('チェック項目: 25件で、重複がなく、設定の既定値・解説(CHECK_META)と過不足なく対応する', () => {
+test('チェック項目: 31件で、重複がなく、設定の既定値・解説(CHECK_META)と過不足なく対応する', () => {
   const ids = k.getCheckIdOrder();
-  assert.equal(ids.length, 25);
+  assert.equal(ids.length, 31);
   assert.equal(new Set(ids).size, ids.length);
   assert.deepEqual(Object.keys(k.defaultConfig().checks).sort(), [...ids].sort());
   for (const id of ids) assert.ok(k.CHECK_META[id], `CHECK_META に ${id} がありません`);
@@ -102,5 +102,5 @@ test('設定: 空行・不明なキー・=のない行は無視し、行頭末�
 test('設定: 保存形式は key=value を改行で連結する', () => {
   const text = k.serializeConfig(k.defaultConfig());
   assert.ok(text.startsWith('sizeKey=A4\n'));
-  assert.match(text, /\nchecks=size_match:1,bleed:1,/);
+  assert.match(text, /\nchecks=size_match:1,artboard_size_consistency:1,bleed:1,/);
 });
