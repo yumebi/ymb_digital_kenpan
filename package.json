@@ -1,0 +1,8 @@
+{
+  "name": "ymb-digital-kenpan",
+  "private": true,
+  "description": "YMB デジタル検版(Illustrator 用 ExtendScript)。package.json はテストの実行用で、配布物には含まれない。",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
