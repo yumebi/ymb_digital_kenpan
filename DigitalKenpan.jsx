@@ -4046,6 +4046,8 @@ function buildAndShowDialog() {
 
     var summaryText = resultPanel.add("statictext", undefined, "");
     summaryText.graphics.font = ScriptUI.newFont("dialog", "Bold", 18);
+    // 空の文字で作ると高さ・幅が小さく見積もられ、18pt の文字が潰れて表示されるため、大きさを明示する
+    summaryText.preferredSize = [760, 30];
     var finishSizeText = resultPanel.add("statictext", undefined, "");
     finishSizeText.graphics.font = ScriptUI.newFont("dialog", "Bold", 12);
     // 前回との比較・除外したレイヤーの注記(あるときだけ文字が入る)
@@ -4866,7 +4868,8 @@ function buildAndShowDialog() {
             ("✖ エラー " + currentSummary.ngCount + "件・警告 " + currentSummary.warnCount + "件・情報 " + currentSummary.infoCount + "件");
         summaryText.graphics.foregroundColor = summaryText.graphics.newPen(
             summaryText.graphics.PenType.SOLID_COLOR,
-            currentSummary.allOk ? [0.0, 0.45, 0.15] : [0.75, 0.15, 0.1],
+            // 暗い背景でも明るい背景でも読めるよう、彩度と明るさを上げた赤・緑にする(旧: 暗い赤で背景に沈んでいた)
+            currentSummary.allOk ? [0.2, 0.7, 0.35] : [0.95, 0.3, 0.25],
             1
         );
         finishSizeText.text = results.finishSizeText ? ("検出した仕上がりサイズ: " + results.finishSizeText) : "";
