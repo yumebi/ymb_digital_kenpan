@@ -48,6 +48,25 @@ function safeWinLayout(target) {
     }
 }
 
+// safeWinLayout(win) と同じ処理をしたうえで、ウインドウのサイズを呼ぶ前の値に戻す。
+// Windows では win.layout.layout(true) を呼ぶたびに win.size が縦横25px前後増える副作用があり、
+// 設定画面と結果画面を切り替えるたびにウインドウが大きくなっていた(v1.43.0 で対処)。
+// 必要な大きさへの調整は、このあとの applySettingsWindowFit / applyResultWindowFit が行う。
+function safeWinLayoutKeepSize(w) {
+    var bw = safe(function () { return w.size[0]; }, null);
+    var bh = safe(function () { return w.size[1]; }, null);
+    var ok = safeWinLayout(w);
+    if (bw !== null && bh !== null) {
+        var aw = safe(function () { return w.size[0]; }, bw);
+        var ah = safe(function () { return w.size[1]; }, bh);
+        if (aw !== bw || ah !== bh) {
+            FIT_IN_PROGRESS = true;
+            try { w.size = [bw, bh]; } catch (eSize) {} finally { FIT_IN_PROGRESS = false; }
+        }
+    }
+    return ok;
+}
+
 // -----------------------------------------------------------------------------
 // 0z. 診断ログ機構(Mac不具合の実機調査用・一時的な仕込み)
 //     Windows/Macで再現状況が異なる不具合(設定画面のスクロールバー非表示、
@@ -4859,7 +4878,8 @@ function buildAndShowDialog() {
         win.text = TITLE_RESULT_PREFIX + doc.name;
         // 【v1.17.0・監査済み】ここは画面切替(設定→結果)の1回限りのタイミングであり、
         // 高頻度パス(リサイズ/スクロールバー再描画)ではないため win 対象のlayoutを許容する。
-        safeWinLayout(win);
+        // 【v1.43.0】win.sizeが増える副作用を避けるため、サイズを戻す版を使う。
+        safeWinLayoutKeepSize(win);
         // 【v1.15.0】表示直後にresultBodyの自然サイズを実測・固定してからフィット+スクロール範囲を計算する
         // (小さい画面のMacで結果画面の下部が切れて操作不能になる問題への対処。設定画面と同じ手順)
         captureResultBodyNatural("showResults");
@@ -4873,7 +4893,8 @@ function buildAndShowDialog() {
         selStatusText.text = "";
         win.text = TITLE_SETTINGS;
         // 【v1.17.0・監査済み】画面切替(結果→設定)の1回限りのタイミングのため win 対象を許容。
-        safeWinLayout(win);
+        // 【v1.43.0】win.sizeが増える副作用を避けるため、サイズを戻す版を使う。
+        safeWinLayoutKeepSize(win);
         applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
         updateSettingsScrollRange();
     };
@@ -5010,7 +5031,7 @@ function buildAndShowDialog() {
             summaryText.text = "";
             win.text = TITLE_SETTINGS;
             // 【v1.17.0・監査済み】検版の中断/エラー時、設定画面へ戻る1回限りのタイミング
-            safeWinLayout(win);
+            safeWinLayoutKeepSize(win);
             applySettingsResize();      // layoutが乱したジオメトリをbaseline+差分で上書き
             updateSettingsScrollRange();
             if (wasAborted) {
